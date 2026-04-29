@@ -1,0 +1,21 @@
+diff --git a/server/index.js b/server/index.js
+index 62d8513..4a4e700 100755
+--- a/server/index.js
++++ b/server/index.js
+@@ -1408,6 +1408,16 @@ function handleChatConnection(ws, request) {
+                 console.log('📁 Project:', data.options?.projectPath || 'Unknown');
+                 console.log('🔄 Session:', data.options?.sessionId ? 'Resume' : 'New');
+ 
++                // Guard: if this session is already running (e.g. second device
++                // or rapid reconnect), just attach this WS for output — don't
++                // spawn a duplicate SDK query.
++                const reqSessionId = data.options?.sessionId;
++                if (reqSessionId && isClaudeSDKSessionActive(reqSessionId)) {
++                    console.log(`[DEDUP] Session ${reqSessionId} already active, skipping duplicate query`);
++                    reconnectSessionWriter(reqSessionId, ws);
++                    return;
++                }
++
+                 // Use Claude Agents SDK
+                 await queryClaudeSDK(data.command, data.options, writer);
+             } else if (data.type === 'cursor-command') {

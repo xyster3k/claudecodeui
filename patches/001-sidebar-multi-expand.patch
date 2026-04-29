@@ -1,0 +1,17 @@
+diff --git a/src/components/sidebar/hooks/useSidebarController.ts b/src/components/sidebar/hooks/useSidebarController.ts
+index b21f13a..346831d 100644
+--- a/src/components/sidebar/hooks/useSidebarController.ts
++++ b/src/components/sidebar/hooks/useSidebarController.ts
+@@ -298,8 +298,10 @@ export function useSidebarController({
+
+   const toggleProject = useCallback((projectName: string) => {
+     setExpandedProjects((prev) => {
+-      const next = new Set<string>();
+-      if (!prev.has(projectName)) {
++      const next = new Set(prev);
++      if (next.has(projectName)) {
++        next.delete(projectName);
++      } else {
+         next.add(projectName);
+       }
+       return next;

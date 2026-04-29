@@ -1,0 +1,13 @@
+diff --git a/src/components/chat/view/subcomponents/ChatComposer.tsx b/src/components/chat/view/subcomponents/ChatComposer.tsx
+index 9038740..ef2d1bb 100644
+--- a/src/components/chat/view/subcomponents/ChatComposer.tsx
++++ b/src/components/chat/view/subcomponents/ChatComposer.tsx
+@@ -394,7 +394,7 @@ export default function ChatComposer({
+               {sendByCtrlEnter ? t('input.hintText.ctrlEnter') : t('input.hintText.enter')}
+             </div>
+             <PromptInputSubmit
+-              disabled={!input.trim() || isLoading}
++              disabled={!input.trim()}
+               className="h-10 w-10 sm:h-10 sm:w-10"
+               onMouseDown={(event) => {
+                 event.preventDefault();

@@ -1,0 +1,346 @@
+#!/bin/bash
+# cloudcli-project — per-project git identity and GitHub token overrides.
+#
+# Auto-detects the project from the current working directory. No need to type
+# paths or tokens. Token overrides route via CloudCLI's token DB (the same
+# tokens you manage in Settings → API & Tokens).
+#
+# Usage:
+#   cloudcli-project                                    # show this help + current status
+#   cloudcli-project show                               # show overrides for current repo
+#   cloudcli-project show <project-name>                # show overrides for a named project
+#   cloudcli-project list                               # list all projects + their overrides
+#   cloudcli-project tokens                             # list available token names
+#   cloudcli-project projects                           # list project names (for tab-complete in your head)
+#   cloudcli-project identity NAME EMAIL                # set identity on current repo
+#   cloudcli-project identity <project> NAME EMAIL      # set identity on a named project
+#   cloudcli-project token <token-name>                 # set token for current repo
+#   cloudcli-project token <project> <token-name>       # set token for named project
+#   cloudcli-project clear                              # clear ALL overrides on current repo → fall back to global
+#   cloudcli-project clear <project>                    # same, for named project
+#   cloudcli-project clear-identity [project]           # clear only identity
+#   cloudcli-project clear-token [project]              # clear only token routing
+#   cloudcli-project use-ssh [project]                  # switch remote to git@github.com:... (SSH auth via deploy key)
+#   cloudcli-project use-https [project] [token-name]   # switch remote to https:// and (optionally) scope to a named token
+#   cloudcli-project ssh-test                           # check VPS deploy key auth against github.com
+
+set -u
+
+PROJECTS_ROOT="${PROJECTS_ROOT:-/home/node/projects}"
+DB="${CLOUDCLI_DB:-/home/node/.cloudcli/auth.db}"
+REMOTE="${CLOUDCLI_REMOTE_URL:-https://github.com}"
+
+die() { echo "error: $*" >&2; exit 1; }
+
+# Quote a string as a SQLite literal: foo -> 'foo', o'brien -> 'o''brien'
+sql_str() {
+	local s="$1"
+	s=${s//\'/\'\'}
+	printf "'%s'" "$s"
+}
+
+# Resolve a "project argument" to an absolute repo path.
+# Accepts: nothing (use cwd), a bare name (resolve in PROJECTS_ROOT), or an absolute path.
+resolve_repo() {
+	local arg="${1:-}"
+	if [ -z "$arg" ]; then
+		# cwd — walk up to nearest .git
+		local dir
+		dir=$(git rev-parse --show-toplevel 2>/dev/null) || die "not inside a git repo. pass a project name, or cd into a repo."
+		printf '%s' "$dir"
+		return
+	fi
+	if [ -d "$arg/.git" ]; then
+		printf '%s' "$arg"
+		return
+	fi
+	# bare name under PROJECTS_ROOT
+	local candidate="$PROJECTS_ROOT/$arg"
+	if [ -d "$candidate/.git" ]; then
+		printf '%s' "$candidate"
+		return
+	fi
+	die "project not found: $arg  (looked in $PROJECTS_ROOT/ for a directory with .git)"
+}
+
+# Return the github remote URL used to scope credential routing.
+remote_of() {
+	local repo="$1"
+	git -C "$repo" remote get-url origin 2>/dev/null | sed -E 's|://[^@]+@|://|'
+}
+
+# ---- commands ---------------------------------------------------------------
+
+cmd_help() {
+	sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+cmd_list() {
+	printf '%-24s %-18s %-40s %-12s\n' 'PROJECT' 'IDENTITY' 'EMAIL' 'TOKEN'
+	printf '%-24s %-18s %-40s %-12s\n' '------------------------' '------------------' '----------------------------------------' '------------'
+	for d in "$PROJECTS_ROOT"/*/; do
+		[ -d "$d/.git" ] || continue
+		local name n e t remote
+		name=$(basename "$d")
+		n=$(git -C "$d" config --local --get user.name 2>/dev/null)
+		e=$(git -C "$d" config --local --get user.email 2>/dev/null)
+		remote=$(git -C "$d" remote get-url origin 2>/dev/null | sed -E 's|://[^@]+@|://|')
+		t=$(git -C "$d" config --local --get "credential.${remote%.git}.username" 2>/dev/null)
+		printf '%-24s %-18s %-40s %-12s\n' "${name:0:24}" "${n:-<global>}" "${e:-<global>}" "${t:-<global>}"
+	done
+	echo
+	echo "(VPN routing is host-side — run 'vps-vpn routes' on the VPS to see which tunnels cover which subnets)"
+}
+
+cmd_projects() {
+	for d in "$PROJECTS_ROOT"/*/; do
+		[ -d "$d/.git" ] || continue
+		basename "$d"
+	done
+}
+
+cmd_tokens() {
+	[ -r "$DB" ] || die "CloudCLI DB not readable at $DB"
+	echo "Tokens available (from Settings → API & Tokens):"
+	# Show per-token git identity when present
+	sqlite3 -noheader -batch "$DB" \
+		"SELECT '  ' || credential_name || '  (' ||
+		    CASE is_active WHEN 1 THEN 'active' ELSE 'inactive' END ||
+		    ', added ' || substr(created_at,1,10) || ')' ||
+		    CASE
+		        WHEN git_name IS NOT NULL AND git_email IS NOT NULL
+		            THEN char(10) || '     identity: ' || git_name || ' <' || git_email || '>'
+		        WHEN git_name IS NOT NULL
+		            THEN char(10) || '     identity: ' || git_name || ' <inherit>'
+		        WHEN git_email IS NOT NULL
+		            THEN char(10) || '     identity: <inherit> <' || git_email || '>'
+		        ELSE ''
+		    END
+		 FROM user_credentials
+		 WHERE credential_type='github_token'
+		 ORDER BY created_at DESC;" 2>/dev/null
+	echo
+	echo "Use the token NAME (first column) when running: cloudcli-project token <name>"
+	echo "Tokens without a per-token identity fall back to the global Settings → Git values."
+}
+
+cmd_show() {
+	local repo
+	repo=$(resolve_repo "${1:-}")
+	local n e remote t
+	n=$(git -C "$repo" config --local --get user.name 2>/dev/null)
+	e=$(git -C "$repo" config --local --get user.email 2>/dev/null)
+	remote=$(remote_of "$repo")
+	t=$(git -C "$repo" config --local --get "credential.${remote%.git}.username" 2>/dev/null)
+
+	echo "project:    $(basename "$repo")"
+	echo "path:       $repo"
+	echo "remote:     ${remote:-<none>}"
+	echo
+	echo "OVERRIDES (empty = fall back to global Settings):"
+	echo "  user.name:  ${n:-<global>}"
+	echo "  user.email: ${e:-<global>}"
+	echo "  token:      ${t:-<global>}"
+	echo
+	echo "EFFECTIVE (what git actually uses):"
+	echo "  user.name:  $(git -C "$repo" config --get user.name 2>/dev/null)"
+	echo "  user.email: $(git -C "$repo" config --get user.email 2>/dev/null)"
+}
+
+cmd_identity() {
+	local repo name email
+	# accept (project, name, email) OR (name, email)
+	if [ "$#" -eq 3 ]; then
+		repo=$(resolve_repo "$1")
+		name="$2"
+		email="$3"
+	elif [ "$#" -eq 2 ]; then
+		repo=$(resolve_repo "")
+		name="$1"
+		email="$2"
+	else
+		die "usage: cloudcli-project identity [<project>] <name> <email>"
+	fi
+	git -C "$repo" config --local user.name "$name"
+	git -C "$repo" config --local user.email "$email"
+	echo "set on $(basename "$repo"):"
+	echo "  user.name  = $name"
+	echo "  user.email = $email"
+}
+
+cmd_token() {
+	local repo token
+	if [ "$#" -eq 2 ]; then
+		repo=$(resolve_repo "$1")
+		token="$2"
+	elif [ "$#" -eq 1 ]; then
+		repo=$(resolve_repo "")
+		token="$1"
+	else
+		die "usage: cloudcli-project token [<project>] <token-name>   (run 'cloudcli-project tokens' to see names)"
+	fi
+	[ -r "$DB" ] || die "CloudCLI DB not readable at $DB"
+	local exists
+	local quoted
+	quoted=$(sql_str "$token")
+	exists=$(sqlite3 -noheader -batch "$DB" \
+		"SELECT COUNT(*) FROM user_credentials WHERE credential_type='github_token' AND credential_name=$quoted;" 2>/dev/null || echo 0)
+	[ "$exists" -ge 1 ] || die "no token named '$token' in CloudCLI Settings → API & Tokens. Run 'cloudcli-project tokens' to see what's available, or add it in the UI first."
+
+	local remote
+	remote=$(remote_of "$repo")
+	[ -n "$remote" ] || die "repo has no 'origin' remote — can't scope a token to it"
+	local key="credential.${remote%.git}.username"
+	git -C "$repo" config --local "$key" "$token"
+	echo "set on $(basename "$repo"):"
+	echo "  $key = $token"
+	echo "  (push/pull on this repo will now use the '$token' token from Settings → API & Tokens)"
+}
+
+cmd_clear() {
+	local repo
+	repo=$(resolve_repo "${1:-}")
+	git -C "$repo" config --local --unset user.name 2>/dev/null || true
+	git -C "$repo" config --local --unset user.email 2>/dev/null || true
+	local remote
+	remote=$(remote_of "$repo")
+	if [ -n "$remote" ]; then
+		git -C "$repo" config --local --unset "credential.${remote%.git}.username" 2>/dev/null || true
+		# Also remove the now-empty [credential ...] section
+		git -C "$repo" config --local --remove-section "credential.${remote%.git}" 2>/dev/null || true
+	fi
+	echo "cleared all overrides on $(basename "$repo") — now uses global Settings."
+}
+
+cmd_clear_identity() {
+	local repo
+	repo=$(resolve_repo "${1:-}")
+	git -C "$repo" config --local --unset user.name 2>/dev/null || true
+	git -C "$repo" config --local --unset user.email 2>/dev/null || true
+	echo "identity override cleared on $(basename "$repo")."
+}
+
+# Convert a github URL to SSH form (https://github.com/u/r[.git] -> git@github.com:u/r.git) or leave unchanged.
+# Note: bash ERE doesn't support non-greedy quantifiers, so strip suffixes via shell parameter expansion.
+to_ssh_url() {
+	local u="$1"
+	if [[ "$u" =~ ^git@|^ssh:// ]]; then printf '%s' "$u"; return; fi
+	if [[ "$u" =~ ^https?://github\.com/([^/]+)/(.+)$ ]]; then
+		local owner="${BASH_REMATCH[1]}"
+		local repo="${BASH_REMATCH[2]}"
+		repo="${repo%/}"            # drop trailing slash
+		repo="${repo%.git}"         # drop .git suffix (once)
+		printf 'git@github.com:%s/%s.git' "$owner" "$repo"
+		return
+	fi
+	printf '%s' "$u"
+}
+
+# Convert ssh to https form
+to_https_url() {
+	local u="$1"
+	if [[ "$u" =~ ^https?://github\.com ]]; then printf '%s' "$u"; return; fi
+	if [[ "$u" =~ ^git@github\.com:([^/]+)/(.+)$ ]]; then
+		local owner="${BASH_REMATCH[1]}"
+		local repo="${BASH_REMATCH[2]}"
+		repo="${repo%.git}"
+		printf 'https://github.com/%s/%s' "$owner" "$repo"
+		return
+	fi
+	printf '%s' "$u"
+}
+
+cmd_use_ssh() {
+	local repo
+	repo=$(resolve_repo "${1:-}")
+	local cur ssh
+	cur=$(git -C "$repo" remote get-url origin 2>/dev/null)
+	[ -n "$cur" ] || die "repo has no origin remote"
+	ssh=$(to_ssh_url "$cur")
+	git -C "$repo" remote set-url origin "$ssh"
+	# SSH auth doesn't go through our credential helper — strip any credential.<url>.username leftover
+	local remote_clean
+	remote_clean=$(echo "$cur" | sed -E 's|://[^@]+@|://|; s|/$||; s|\.git$||')
+	git -C "$repo" config --local --remove-section "credential.${remote_clean}" 2>/dev/null || true
+	echo "$(basename "$repo") → SSH via ~/.ssh/id_ed25519_deploy"
+	echo "remote is now: $ssh"
+	echo
+	echo "Reminder: the deploy public key must be added to your GitHub account:"
+	echo "  https://github.com/settings/ssh/new"
+	echo "Test with: cloudcli-project ssh-test"
+}
+
+cmd_use_https() {
+	local repo token
+	if [ "$#" -ge 2 ]; then
+		repo=$(resolve_repo "$1"); token="$2"
+	elif [ "$#" -eq 1 ]; then
+		# Ambiguous: could be project OR token. Treat as token if we're inside a repo, else as project.
+		if git rev-parse --show-toplevel &>/dev/null; then
+			repo=$(resolve_repo ""); token="$1"
+		else
+			repo=$(resolve_repo "$1"); token=""
+		fi
+	else
+		repo=$(resolve_repo ""); token=""
+	fi
+	local cur https
+	cur=$(git -C "$repo" remote get-url origin 2>/dev/null)
+	[ -n "$cur" ] || die "repo has no origin remote"
+	https=$(to_https_url "$cur")
+	git -C "$repo" remote set-url origin "$https"
+	echo "$(basename "$repo") → HTTPS"
+	echo "remote is now: $https"
+	if [ -n "$token" ]; then
+		cmd_token "$(basename "$repo")" "$token"
+	else
+		echo "(no token routing set — will use the globally active token)"
+	fi
+}
+
+cmd_ssh_test() {
+	echo "Testing SSH auth to git@github.com..."
+	# ssh -T to github.com returns exit 1 on success with message "Hi <user>!"
+	local out
+	out=$(ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -T git@github.com 2>&1 || true)
+	echo "$out"
+	if echo "$out" | grep -q 'successfully authenticated'; then
+		echo
+		echo "✓ SSH auth works — you can use 'cloudcli-project use-ssh' on any repo"
+	else
+		echo
+		echo "✗ SSH auth failed. Add this public key to https://github.com/settings/ssh/new :"
+		cat /home/node/.ssh/id_ed25519_deploy.pub 2>/dev/null || echo "(deploy pubkey not found at /home/node/.ssh/id_ed25519_deploy.pub)"
+	fi
+}
+
+cmd_clear_token() {
+	local repo
+	repo=$(resolve_repo "${1:-}")
+	local remote
+	remote=$(remote_of "$repo")
+	if [ -n "$remote" ]; then
+		git -C "$repo" config --local --unset "credential.${remote%.git}.username" 2>/dev/null || true
+		git -C "$repo" config --local --remove-section "credential.${remote%.git}" 2>/dev/null || true
+	fi
+	echo "token override cleared on $(basename "$repo")."
+}
+
+# ---- dispatch ---------------------------------------------------------------
+
+case "${1:-help}" in
+	''|help|-h|--help)       cmd_help ;;
+	list|ls)                 cmd_list ;;
+	projects)                cmd_projects ;;
+	tokens)                  cmd_tokens ;;
+	show|status)             shift; cmd_show "$@" ;;
+	identity|id)             shift; cmd_identity "$@" ;;
+	token)                   shift; cmd_token "$@" ;;
+	clear|reset)             shift; cmd_clear "$@" ;;
+	clear-identity)          shift; cmd_clear_identity "$@" ;;
+	clear-token)             shift; cmd_clear_token "$@" ;;
+	use-ssh)                 shift; cmd_use_ssh "$@" ;;
+	use-https)               shift; cmd_use_https "$@" ;;
+	ssh-test)                cmd_ssh_test ;;
+	*)                       die "unknown command: $1  (run 'cloudcli-project' for help)" ;;
+esac

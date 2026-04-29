@@ -1,0 +1,414 @@
+diff --git a/server/database/db.js b/server/database/db.js
+index f43c894..eb994a5 100644
+--- a/server/database/db.js
++++ b/server/database/db.js
+@@ -105,6 +105,18 @@ const runMigrations = () => {
+       db.exec('ALTER TABLE users ADD COLUMN has_completed_onboarding BOOLEAN DEFAULT 0');
+     }
+ 
++    // user_credentials: add git_name / git_email so a token can carry its own
++    // commit identity (used when cloning a new repo via that token).
++    const credColumns = db.prepare("PRAGMA table_info(user_credentials)").all().map(c => c.name);
++    if (!credColumns.includes('git_name')) {
++      console.log('Running migration: Adding user_credentials.git_name column');
++      db.exec('ALTER TABLE user_credentials ADD COLUMN git_name TEXT');
++    }
++    if (!credColumns.includes('git_email')) {
++      console.log('Running migration: Adding user_credentials.git_email column');
++      db.exec('ALTER TABLE user_credentials ADD COLUMN git_email TEXT');
++    }
++
+     db.exec(USER_NOTIFICATION_PREFERENCES_TABLE_SQL);
+     db.exec(VAPID_KEYS_TABLE_SQL);
+     db.exec(PUSH_SUBSCRIPTIONS_TABLE_SQL);
+@@ -304,21 +316,32 @@ const apiKeysDb = {
+ 
+ // User credentials database operations (for GitHub tokens, GitLab tokens, etc.)
+ const credentialsDb = {
+-  // Create a new credential
+-  createCredential: (userId, credentialName, credentialType, credentialValue, description = null) => {
++  // Create a new credential (with optional per-token git identity)
++  createCredential: (userId, credentialName, credentialType, credentialValue, description = null, gitName = null, gitEmail = null) => {
++    try {
++      const stmt = db.prepare('INSERT INTO user_credentials (user_id, credential_name, credential_type, credential_value, description, git_name, git_email) VALUES (?, ?, ?, ?, ?, ?, ?)');
++      const result = stmt.run(userId, credentialName, credentialType, credentialValue, description, gitName, gitEmail);
++      return { id: result.lastInsertRowid, credentialName, credentialType, gitName, gitEmail };
++    } catch (err) {
++      throw err;
++    }
++  },
++
++  // Update per-token git identity fields (leave token value untouched)
++  updateCredentialIdentity: (userId, credentialId, gitName, gitEmail) => {
+     try {
+-      const stmt = db.prepare('INSERT INTO user_credentials (user_id, credential_name, credential_type, credential_value, description) VALUES (?, ?, ?, ?, ?)');
+-      const result = stmt.run(userId, credentialName, credentialType, credentialValue, description);
+-      return { id: result.lastInsertRowid, credentialName, credentialType };
++      const stmt = db.prepare('UPDATE user_credentials SET git_name = ?, git_email = ? WHERE id = ? AND user_id = ?');
++      const result = stmt.run(gitName, gitEmail, credentialId, userId);
++      return result.changes > 0;
+     } catch (err) {
+       throw err;
+     }
+   },
+ 
+-  // Get all credentials for a user, optionally filtered by type
++  // Get all credentials for a user, optionally filtered by type (includes git_name/git_email, excludes the actual token value for security)
+   getCredentials: (userId, credentialType = null) => {
+     try {
+-      let query = 'SELECT id, credential_name, credential_type, description, created_at, is_active FROM user_credentials WHERE user_id = ?';
++      let query = 'SELECT id, credential_name, credential_type, description, git_name, git_email, created_at, is_active FROM user_credentials WHERE user_id = ?';
+       const params = [userId];
+ 
+       if (credentialType) {
+@@ -335,6 +358,16 @@ const credentialsDb = {
+     }
+   },
+ 
++  // Get a single credential by id (full row including value — used by post-clone handler)
++  getCredentialById: (userId, credentialId) => {
++    try {
++      const row = db.prepare('SELECT id, credential_name, credential_type, credential_value, description, git_name, git_email, is_active FROM user_credentials WHERE id = ? AND user_id = ?').get(credentialId, userId);
++      return row || null;
++    } catch (err) {
++      throw err;
++    }
++  },
++
+   // Get active credential value for a user by type (returns most recent active)
+   getActiveCredential: (userId, credentialType) => {
+     try {
+diff --git a/server/routes/projects.js b/server/routes/projects.js
+index cf3a62e..51a468e 100644
+--- a/server/routes/projects.js
++++ b/server/routes/projects.js
+@@ -262,9 +262,23 @@ router.post('/create-workspace', async (req, res) => {
+           // Directory doesn't exist, which is what we want
+         }
+ 
++        // Pick up per-token identity if the chosen token carries one
++        let tokenIdentity = null;
++        if (githubTokenId) {
++          const credRow = await getGithubTokenById(githubTokenId, req.user.id);
++          tokenIdentity = credRow
++            ? {
++                name: credRow.credential_name || null,
++                gitName: credRow.git_name || null,
++                gitEmail: credRow.git_email || null,
++              }
++            : null;
++        }
++
+         // Clone the repository into a subfolder
+         try {
+           await cloneGitHubRepository(githubUrl, clonePath, githubToken);
++          await applyPostCloneSettings(clonePath, githubUrl, tokenIdentity);
+         } catch (error) {
+           // Only clean up if clone created partial data (check if dir exists and is empty or partial)
+           try {
+@@ -432,6 +446,15 @@ router.get('/clone-progress', async (req, res) => {
+     gitProcess.on('close', async (code) => {
+       if (code === 0) {
+         try {
++          // Apply per-token identity and credential routing (same as non-SSE path)
++          let tokenIdentity = null;
++          if (githubTokenId) {
++            const credRow = await getGithubTokenById(githubTokenId, req.user.id);
++            tokenIdentity = credRow
++              ? { name: credRow.credential_name || null, gitName: credRow.git_name || null, gitEmail: credRow.git_email || null }
++              : null;
++          }
++          await applyPostCloneSettings(clonePath, githubUrl, tokenIdentity);
+           const project = await addProjectManually(clonePath);
+           sendEvent('complete', { project, message: 'Repository cloned successfully' });
+         } catch (error) {
+@@ -481,6 +504,56 @@ router.get('/clone-progress', async (req, res) => {
+ /**
+  * Helper function to clone a GitHub repository
+  */
++/**
++ * After a successful clone:
++ *   1) Reset the remote URL to the plain form (strip any embedded PAT — it's fine to
++ *      use at clone-time, but shouldn't be persisted to .git/config, where it leaks
++ *      via `git remote -v` and becomes dead on every rotation).
++ *   2) If the credential has a per-token git_name / git_email, write them as
++ *      repo-local user.name / user.email.
++ *   3) If the credential has a name, write `credential.<remote>.username=<name>` so
++ *      future pull/push on this repo are routed by our git credential helper to the
++ *      specific token in the DB (single source of truth).
++ */
++function applyPostCloneSettings(repoPath, originalGithubUrl, tokenIdentity) {
++  return new Promise((resolve) => {
++    // SSH URLs (git@github.com:user/repo.git) are not http(s), can't be URL-parsed,
++    // and don't participate in credential.<url>.username routing. We still apply
++    // per-token git identity for them, but skip the credential routing step.
++    const isSshUrl = /^(ssh:\/\/|[\w.-]+@[\w.-]+:)/.test(originalGithubUrl);
++
++    const cleanUrl = (() => {
++      if (isSshUrl) return originalGithubUrl;
++      try { const u = new URL(originalGithubUrl); u.username = ''; u.password = ''; return u.toString().replace(/\/$/, ''); }
++      catch { return originalGithubUrl; }
++    })();
++
++    const cmds = [['git', ['-C', repoPath, 'remote', 'set-url', 'origin', cleanUrl]]];
++
++    if (tokenIdentity?.gitName) {
++      cmds.push(['git', ['-C', repoPath, 'config', '--local', 'user.name', tokenIdentity.gitName]]);
++    }
++    if (tokenIdentity?.gitEmail) {
++      cmds.push(['git', ['-C', repoPath, 'config', '--local', 'user.email', tokenIdentity.gitEmail]]);
++    }
++    // Only for https URLs: wire credential.<url>.username so our helper picks the right token
++    if (!isSshUrl && tokenIdentity?.name) {
++      const credKey = `credential.${cleanUrl.replace(/\.git$/, '')}.username`;
++      cmds.push(['git', ['-C', repoPath, 'config', '--local', credKey, tokenIdentity.name]]);
++    }
++
++    let i = 0;
++    const runNext = () => {
++      if (i >= cmds.length) return resolve();
++      const [bin, args] = cmds[i++];
++      const p = spawn(bin, args, { stdio: 'ignore' });
++      p.on('close', runNext);
++      p.on('error', runNext); // best-effort; don't fail the clone on post-config issues
++    };
++    runNext();
++  });
++}
++
+ function cloneGitHubRepository(githubUrl, destinationPath, githubToken = null) {
+   return new Promise((resolve, reject) => {
+     let cloneUrl = githubUrl;
+diff --git a/server/routes/settings.js b/server/routes/settings.js
+index e2ce088..ff4c9d4 100644
+--- a/server/routes/settings.js
++++ b/server/routes/settings.js
+@@ -102,10 +102,10 @@ router.get('/credentials', async (req, res) => {
+   }
+ });
+ 
+-// Create a new credential
++// Create a new credential (optionally carries a per-token git identity)
+ router.post('/credentials', async (req, res) => {
+   try {
+-    const { credentialName, credentialType, credentialValue, description } = req.body;
++    const { credentialName, credentialType, credentialValue, description, gitName, gitEmail } = req.body;
+ 
+     if (!credentialName || !credentialName.trim()) {
+       return res.status(400).json({ error: 'Credential name is required' });
+@@ -124,7 +124,9 @@ router.post('/credentials', async (req, res) => {
+       credentialName.trim(),
+       credentialType.trim(),
+       credentialValue.trim(),
+-      description?.trim() || null
++      description?.trim() || null,
++      gitName?.trim() || null,
++      gitEmail?.trim() || null
+     );
+ 
+     res.json({
+@@ -137,6 +139,28 @@ router.post('/credentials', async (req, res) => {
+   }
+ });
+ 
++// Update per-credential git identity (optional fields, null to clear)
++router.patch('/credentials/:credentialId/identity', async (req, res) => {
++  try {
++    const { credentialId } = req.params;
++    const { gitName, gitEmail } = req.body;
++    const success = credentialsDb.updateCredentialIdentity(
++      req.user.id,
++      parseInt(credentialId),
++      gitName?.trim() || null,
++      gitEmail?.trim() || null
++    );
++    if (success) {
++      res.json({ success: true });
++    } else {
++      res.status(404).json({ error: 'Credential not found' });
++    }
++  } catch (error) {
++    console.error('Error updating credential identity:', error);
++    res.status(500).json({ error: 'Failed to update credential identity' });
++  }
++});
++
+ // Delete a credential
+ router.delete('/credentials/:credentialId', async (req, res) => {
+   try {
+diff --git a/src/components/settings/hooks/useCredentialsSettings.ts b/src/components/settings/hooks/useCredentialsSettings.ts
+index 4a9afc4..79bf8d2 100644
+--- a/src/components/settings/hooks/useCredentialsSettings.ts
++++ b/src/components/settings/hooks/useCredentialsSettings.ts
+@@ -33,6 +33,8 @@ export function useCredentialsSettings({
+   const [newGithubName, setNewGithubName] = useState('');
+   const [newGithubToken, setNewGithubToken] = useState('');
+   const [newGithubDescription, setNewGithubDescription] = useState('');
++  const [newGithubGitName, setNewGithubGitName] = useState('');
++  const [newGithubGitEmail, setNewGithubGitEmail] = useState('');
+ 
+   const [showToken, setShowToken] = useState<Record<string, boolean>>({});
+   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+@@ -143,6 +145,8 @@ export function useCredentialsSettings({
+           credentialType: 'github_token',
+           credentialValue: newGithubToken,
+           description: newGithubDescription.trim(),
++          gitName: newGithubGitName.trim() || null,
++          gitEmail: newGithubGitEmail.trim() || null,
+         }),
+       });
+ 
+@@ -155,13 +159,15 @@ export function useCredentialsSettings({
+       setNewGithubName('');
+       setNewGithubToken('');
+       setNewGithubDescription('');
++      setNewGithubGitName('');
++      setNewGithubGitEmail('');
+       setShowNewGithubForm(false);
+       setShowToken((prev) => ({ ...prev, new: false }));
+       await fetchData();
+     } catch (error) {
+       console.error('Error creating GitHub credential:', error);
+     }
+-  }, [fetchData, newGithubDescription, newGithubName, newGithubToken]);
++  }, [fetchData, newGithubDescription, newGithubName, newGithubToken, newGithubGitName, newGithubGitEmail]);
+ 
+   const deleteGithubCredential = useCallback(async (credentialId: string) => {
+     if (!window.confirm(confirmDeleteGithubCredentialText)) {
+@@ -228,6 +234,8 @@ export function useCredentialsSettings({
+     setNewGithubName('');
+     setNewGithubToken('');
+     setNewGithubDescription('');
++    setNewGithubGitName('');
++    setNewGithubGitEmail('');
+     setShowToken((prev) => ({ ...prev, new: false }));
+   }, []);
+ 
+@@ -255,6 +263,10 @@ export function useCredentialsSettings({
+     setNewGithubToken,
+     newGithubDescription,
+     setNewGithubDescription,
++    newGithubGitName,
++    setNewGithubGitName,
++    newGithubGitEmail,
++    setNewGithubGitEmail,
+     showToken,
+     copiedKey,
+     newlyCreatedKey,
+diff --git a/src/components/settings/view/tabs/api-settings/CredentialsSettingsTab.tsx b/src/components/settings/view/tabs/api-settings/CredentialsSettingsTab.tsx
+index 89d440c..340d0f7 100644
+--- a/src/components/settings/view/tabs/api-settings/CredentialsSettingsTab.tsx
++++ b/src/components/settings/view/tabs/api-settings/CredentialsSettingsTab.tsx
+@@ -22,6 +22,10 @@ export default function CredentialsSettingsTab() {
+     setNewGithubToken,
+     newGithubDescription,
+     setNewGithubDescription,
++    newGithubGitName,
++    setNewGithubGitName,
++    newGithubGitEmail,
++    setNewGithubGitEmail,
+     showToken,
+     copiedKey,
+     newlyCreatedKey,
+@@ -75,10 +79,14 @@ export default function CredentialsSettingsTab() {
+         newGithubName={newGithubName}
+         newGithubToken={newGithubToken}
+         newGithubDescription={newGithubDescription}
++        newGithubGitName={newGithubGitName}
++        newGithubGitEmail={newGithubGitEmail}
+         onShowNewGithubFormChange={setShowNewGithubForm}
+         onNewGithubNameChange={setNewGithubName}
+         onNewGithubTokenChange={setNewGithubToken}
+         onNewGithubDescriptionChange={setNewGithubDescription}
++        onNewGithubGitNameChange={setNewGithubGitName}
++        onNewGithubGitEmailChange={setNewGithubGitEmail}
+         onToggleNewTokenVisibility={toggleNewGithubTokenVisibility}
+         onCreateGithubCredential={createGithubCredential}
+         onCancelCreateGithubCredential={cancelNewGithubForm}
+diff --git a/src/components/settings/view/tabs/api-settings/sections/GithubCredentialsSection.tsx b/src/components/settings/view/tabs/api-settings/sections/GithubCredentialsSection.tsx
+index 683fcf5..38a18eb 100644
+--- a/src/components/settings/view/tabs/api-settings/sections/GithubCredentialsSection.tsx
++++ b/src/components/settings/view/tabs/api-settings/sections/GithubCredentialsSection.tsx
+@@ -10,10 +10,14 @@ type GithubCredentialsSectionProps = {
+   newGithubName: string;
+   newGithubToken: string;
+   newGithubDescription: string;
++  newGithubGitName: string;
++  newGithubGitEmail: string;
+   onShowNewGithubFormChange: (value: boolean) => void;
+   onNewGithubNameChange: (value: string) => void;
+   onNewGithubTokenChange: (value: string) => void;
+   onNewGithubDescriptionChange: (value: string) => void;
++  onNewGithubGitNameChange: (value: string) => void;
++  onNewGithubGitEmailChange: (value: string) => void;
+   onToggleNewTokenVisibility: () => void;
+   onCreateGithubCredential: () => void;
+   onCancelCreateGithubCredential: () => void;
+@@ -28,10 +32,14 @@ export default function GithubCredentialsSection({
+   newGithubName,
+   newGithubToken,
+   newGithubDescription,
++  newGithubGitName,
++  newGithubGitEmail,
+   onShowNewGithubFormChange,
+   onNewGithubNameChange,
+   onNewGithubTokenChange,
+   onNewGithubDescriptionChange,
++  onNewGithubGitNameChange,
++  onNewGithubGitEmailChange,
+   onToggleNewTokenVisibility,
+   onCreateGithubCredential,
+   onCancelCreateGithubCredential,
+@@ -87,6 +95,27 @@ export default function GithubCredentialsSection({
+             onChange={(event) => onNewGithubDescriptionChange(event.target.value)}
+           />
+ 
++          <div className="rounded-md border border-dashed bg-muted/30 p-3">
++            <p className="mb-2 text-xs font-medium text-muted-foreground">
++              Per-token git identity (optional)
++            </p>
++            <p className="mb-3 text-xs text-muted-foreground">
++              If set, new repos cloned with this token get these as their commit author. Leave empty to inherit the global Settings &rarr; Git identity.
++            </p>
++            <div className="space-y-2">
++              <Input
++                placeholder='Git name (e.g. "Xyster3k")'
++                value={newGithubGitName}
++                onChange={(event) => onNewGithubGitNameChange(event.target.value)}
++              />
++              <Input
++                placeholder='Git email (e.g. "141751440+xyster3k@users.noreply.github.com")'
++                value={newGithubGitEmail}
++                onChange={(event) => onNewGithubGitEmailChange(event.target.value)}
++              />
++            </div>
++          </div>
++
+           <div className="flex gap-2">
+             <Button onClick={onCreateGithubCredential}>{t('apiKeys.github.form.addButton')}</Button>
+             <Button variant="outline" onClick={onCancelCreateGithubCredential}>
+@@ -116,6 +145,11 @@ export default function GithubCredentialsSection({
+                 {credential.description && (
+                   <div className="text-xs text-muted-foreground">{credential.description}</div>
+                 )}
++                {(credential.git_name || credential.git_email) && (
++                  <div className="mt-1 text-xs text-muted-foreground">
++                    identity: {credential.git_name || '(inherit)'} &lt;{credential.git_email || '(inherit)'}&gt;
++                  </div>
++                )}
+                 <div className="mt-1 text-xs text-muted-foreground">
+                   {t('apiKeys.github.added')} {new Date(credential.created_at).toLocaleDateString()}
+                 </div>
+diff --git a/src/components/settings/view/tabs/api-settings/types.ts b/src/components/settings/view/tabs/api-settings/types.ts
+index b3d3ae1..1990d48 100644
+--- a/src/components/settings/view/tabs/api-settings/types.ts
++++ b/src/components/settings/view/tabs/api-settings/types.ts
+@@ -18,6 +18,8 @@ export type GithubCredentialItem = {
+   id: string;
+   credential_name: string;
+   description?: string | null;
++  git_name?: string | null;
++  git_email?: string | null;
+   created_at: string;
+   is_active: boolean;
+ };

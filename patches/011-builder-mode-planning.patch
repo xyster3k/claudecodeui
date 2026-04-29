@@ -1,0 +1,274 @@
+diff --git a/server/index.js b/server/index.js
+index 62d8513..d7494eb 100755
+--- a/server/index.js
++++ b/server/index.js
+@@ -33,6 +33,7 @@ import { queryClaudeSDK, abortClaudeSDKSession, isClaudeSDKSessionActive, getAct
+ import { spawnCursor, abortCursorSession, isCursorSessionActive, getActiveCursorSessions } from './cursor-cli.js';
+ import { queryCodex, abortCodexSession, isCodexSessionActive, getActiveCodexSessions } from './openai-codex.js';
+ import { spawnGemini, abortGeminiSession, isGeminiSessionActive, getActiveGeminiSessions } from './gemini-cli.js';
++import { runBuilderWorkflow } from './builder-mode.js';
+ import sessionManager from './sessionManager.js';
+ import gitRoutes from './routes/git.js';
+ import authRoutes from './routes/auth.js';
+@@ -1402,6 +1403,28 @@ function handleChatConnection(ws, request) {
+     ws.on('message', async (message) => {
+         try {
+             const data = JSON.parse(message);
++            const workflowMode = data.options?.workflowMode;
++
++            if (
++                workflowMode === 'builder' &&
++                (
++                    data.type === 'claude-command' ||
++                    data.type === 'cursor-command' ||
++                    data.type === 'codex-command' ||
++                    data.type === 'gemini-command'
++                )
++            ) {
++                const provider =
++                    data.type === 'cursor-command'
++                        ? 'cursor'
++                        : data.type === 'codex-command'
++                            ? 'codex'
++                            : data.type === 'gemini-command'
++                                ? 'gemini'
++                                : 'claude';
++                await runBuilderWorkflow(data.command || '', data.options || {}, writer, provider);
++                return;
++            }
+ 
+             if (data.type === 'claude-command') {
+                 console.log('[DEBUG] User message:', data.command || '[Continue/Resume]');
+diff --git a/src/components/chat/hooks/useChatComposerState.ts b/src/components/chat/hooks/useChatComposerState.ts
+index 3b16721..0cb27f1 100644
+--- a/src/components/chat/hooks/useChatComposerState.ts
++++ b/src/components/chat/hooks/useChatComposerState.ts
+@@ -18,6 +18,7 @@ import type {
+   ChatMessage,
+   PendingPermissionRequest,
+   PermissionMode,
++  WorkflowMode,
+ } from '../types/types';
+ import type { Project, ProjectSession, LLMProvider } from '../../../types/app';
+ import { escapeRegExp } from '../utils/chatFormatting';
+@@ -144,6 +145,13 @@ export function useChatComposerState({
+   const [imageErrors, setImageErrors] = useState<Map<string, string>>(new Map());
+   const [isTextareaExpanded, setIsTextareaExpanded] = useState(false);
+   const [thinkingMode, setThinkingMode] = useState('none');
++  const [workflowMode, setWorkflowMode] = useState<WorkflowMode>(() => {
++    if (typeof window === 'undefined' || !selectedProject) {
++      return 'chat';
++    }
++    const savedMode = safeLocalStorage.getItem(`workflow_mode_${selectedProject.name}`);
++    return savedMode === 'builder' ? 'builder' : 'chat';
++  });
+ 
+   const textareaRef = useRef<HTMLTextAreaElement>(null);
+   const inputHighlightRef = useRef<HTMLDivElement>(null);
+@@ -605,6 +613,7 @@ export function useChatComposerState({
+             skipPermissions: toolsSettings?.skipPermissions || false,
+             sessionSummary,
+             toolsSettings,
++            workflowMode,
+           },
+         });
+       } else if (provider === 'codex') {
+@@ -620,6 +629,7 @@ export function useChatComposerState({
+             model: codexModel,
+             sessionSummary,
+             permissionMode: permissionMode === 'plan' ? 'default' : permissionMode,
++            workflowMode,
+           },
+         });
+       } else if (provider === 'gemini') {
+@@ -636,6 +646,7 @@ export function useChatComposerState({
+             sessionSummary,
+             permissionMode,
+             toolsSettings,
++            workflowMode,
+           },
+         });
+       } else {
+@@ -652,6 +663,7 @@ export function useChatComposerState({
+             model: claudeModel,
+             sessionSummary,
+             images: uploadedImages,
++            workflowMode,
+           },
+         });
+       }
+@@ -697,6 +709,7 @@ export function useChatComposerState({
+       setIsUserScrolledUp,
+       slashCommands,
+       thinkingMode,
++      workflowMode,
+     ],
+   );
+ 
+@@ -731,6 +744,21 @@ export function useChatComposerState({
+     }
+   }, [input, selectedProject]);
+ 
++  useEffect(() => {
++    if (!selectedProject) {
++      return;
++    }
++    safeLocalStorage.setItem(`workflow_mode_${selectedProject.name}`, workflowMode);
++  }, [workflowMode, selectedProject]);
++
++  useEffect(() => {
++    if (!selectedProject) {
++      return;
++    }
++    const savedMode = safeLocalStorage.getItem(`workflow_mode_${selectedProject.name}`);
++    setWorkflowMode(savedMode === 'builder' ? 'builder' : 'chat');
++  }, [selectedProject?.name]);
++
+   useEffect(() => {
+     if (!textareaRef.current) {
+       return;
+@@ -878,6 +906,10 @@ export function useChatComposerState({
+     });
+   }, [canAbortSession, currentSessionId, pendingViewSessionRef, provider, selectedSession?.id, sendMessage]);
+ 
++  const toggleWorkflowMode = useCallback(() => {
++    setWorkflowMode((current) => (current === 'chat' ? 'builder' : 'chat'));
++  }, []);
++
+   const handleGrantToolPermission = useCallback(
+     (suggestion: { entry: string; toolName: string }) => {
+       if (!suggestion || provider !== 'claude') {
+@@ -970,6 +1002,8 @@ export function useChatComposerState({
+     syncInputOverlayScroll,
+     handleClearInput,
+     handleAbortSession,
++    workflowMode,
++    toggleWorkflowMode,
+     handlePermissionDecision,
+     handleGrantToolPermission,
+     handleInputFocusChange,
+diff --git a/src/components/chat/types/types.ts b/src/components/chat/types/types.ts
+index 900028c..8ce9a07 100644
+--- a/src/components/chat/types/types.ts
++++ b/src/components/chat/types/types.ts
+@@ -3,6 +3,7 @@ import type { Project, ProjectSession, LLMProvider } from '../../../types/app';
+ export type Provider = LLMProvider;
+ 
+ export type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
++export type WorkflowMode = 'chat' | 'builder';
+ 
+ export interface ChatImage {
+   data: string;
+diff --git a/src/components/chat/view/ChatInterface.tsx b/src/components/chat/view/ChatInterface.tsx
+index 1b3ae95..72d34c3 100644
+--- a/src/components/chat/view/ChatInterface.tsx
++++ b/src/components/chat/view/ChatInterface.tsx
+@@ -168,6 +168,8 @@ function ChatInterface({
+     syncInputOverlayScroll,
+     handleClearInput,
+     handleAbortSession,
++    workflowMode,
++    toggleWorkflowMode,
+     handlePermissionDecision,
+     handleGrantToolPermission,
+     handleInputFocusChange,
+@@ -354,6 +356,8 @@ function ChatInterface({
+           claudeStatus={claudeStatus}
+           isLoading={isLoading}
+           onAbortSession={handleAbortSession}
++          workflowMode={workflowMode}
++          onWorkflowModeToggle={toggleWorkflowMode}
+           provider={provider}
+           permissionMode={permissionMode}
+           onModeSwitch={cyclePermissionMode}
+@@ -401,7 +405,7 @@ function ChatInterface({
+           onTextareaScrollSync={syncInputOverlayScroll}
+           onTextareaInput={handleTextareaInput}
+           onInputFocusChange={handleInputFocusChange}
+-          placeholder={t('input.placeholder', {
++          placeholder={t(workflowMode === 'builder' ? 'input.builderPlaceholder' : 'input.placeholder', {
+             provider:
+               provider === 'cursor'
+                 ? t('messageTypes.cursor')
+diff --git a/src/components/chat/view/subcomponents/ChatComposer.tsx b/src/components/chat/view/subcomponents/ChatComposer.tsx
+index e67ee64..1b57711 100644
+--- a/src/components/chat/view/subcomponents/ChatComposer.tsx
++++ b/src/components/chat/view/subcomponents/ChatComposer.tsx
+@@ -11,8 +11,8 @@ import type {
+   SetStateAction,
+   TouchEvent,
+ } from 'react';
+-import { ImageIcon, MessageSquareIcon, XIcon, ArrowDownIcon } from 'lucide-react';
+-import type { PendingPermissionRequest, PermissionMode, Provider } from '../../types/types';
++import { ImageIcon, MessageSquareIcon, WrenchIcon, XIcon, ArrowDownIcon } from 'lucide-react';
++import type { PendingPermissionRequest, PermissionMode, Provider, WorkflowMode } from '../../types/types';
+ import CommandMenu from './CommandMenu';
+ import ClaudeStatus from './ClaudeStatus';
+ import ImageAttachment from './ImageAttachment';
+@@ -55,6 +55,8 @@ interface ChatComposerProps {
+   claudeStatus: { text: string; tokens: number; can_interrupt: boolean } | null;
+   isLoading: boolean;
+   onAbortSession: () => void;
++  workflowMode: WorkflowMode;
++  onWorkflowModeToggle: () => void;
+   provider: Provider | string;
+   permissionMode: PermissionMode | string;
+   onModeSwitch: () => void;
+@@ -110,6 +112,8 @@ export default function ChatComposer({
+   claudeStatus,
+   isLoading,
+   onAbortSession,
++  workflowMode,
++  onWorkflowModeToggle,
+   provider,
+   permissionMode,
+   onModeSwitch,
+@@ -317,6 +321,24 @@ export default function ChatComposer({
+               <ImageIcon />
+             </PromptInputButton>
+ 
++            <button
++              type="button"
++              onClick={onWorkflowModeToggle}
++              className={`rounded-lg border p-2 text-xs font-medium transition-all duration-200 sm:px-2.5 sm:py-1 ${
++                workflowMode === 'builder'
++                  ? 'border-sky-300/60 bg-sky-50 text-sky-700 hover:bg-sky-100 dark:border-sky-600/40 dark:bg-sky-900/15 dark:text-sky-300 dark:hover:bg-sky-900/25'
++                  : 'border-border/60 bg-muted/50 text-muted-foreground hover:bg-muted'
++              }`}
++              title={t('input.workflowModeToggle')}
++            >
++              <div className="flex items-center gap-1.5">
++                <WrenchIcon className="h-3.5 w-3.5" />
++                <span className="hidden whitespace-nowrap sm:inline">
++                  {workflowMode === 'builder' ? t('input.workflowModes.builder') : t('input.workflowModes.chat')}
++                </span>
++              </div>
++            </button>
++
+             <button
+               type="button"
+               onClick={onModeSwitch}
+diff --git a/src/i18n/locales/en/chat.json b/src/i18n/locales/en/chat.json
+index dadaea8..0197ae8 100644
+--- a/src/i18n/locales/en/chat.json
++++ b/src/i18n/locales/en/chat.json
+@@ -121,6 +121,7 @@
+   },
+   "input": {
+     "placeholder": "Type / for commands, @ for files, or ask {{provider}} anything...",
++    "builderPlaceholder": "Describe the change you want built. Builder Mode will draft a PRD and task plan before execution.",
+     "placeholderDefault": "Type your message...",
+     "disabled": "Input disabled",
+     "attachFiles": "Attach files",
+@@ -132,6 +133,11 @@
+       "enter": "Enter to send • Shift+Enter for new line • Tab to change modes • / for slash commands"
+     },
+     "clickToChangeMode": "Click to change permission mode (or press Tab in input)",
++    "workflowModeToggle": "Toggle between normal chat and builder workflow mode",
++    "workflowModes": {
++      "chat": "Chat",
++      "builder": "Build"
++    },
+     "showAllCommands": "Show all commands",
+     "clearInput": "Clear input",
+     "scrollToBottom": "Scroll to bottom"

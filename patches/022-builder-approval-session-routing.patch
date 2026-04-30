@@ -1,0 +1,41 @@
+diff --git a/src/components/chat/hooks/useChatRealtimeHandlers.ts b/src/components/chat/hooks/useChatRealtimeHandlers.ts
+index 73d1a5e..06c86ea 100644
+--- a/src/components/chat/hooks/useChatRealtimeHandlers.ts
++++ b/src/components/chat/hooks/useChatRealtimeHandlers.ts
+@@ -100,6 +100,7 @@ export function useChatRealtimeHandlers({
+   sessionStore,
+ }: UseChatRealtimeHandlersArgs) {
+   const lastProcessedMessageRef = useRef<LatestChatMessage | null>(null);
++  const isBuilderSessionId = (sessionId?: string | null) => typeof sessionId === 'string' && sessionId.startsWith('builder-');
+ 
+   useEffect(() => {
+     if (!latestMessage) return;
+@@ -228,7 +229,16 @@ export function useChatRealtimeHandlers({
+         const newSessionId = msg.newSessionId;
+         if (!newSessionId) break;
+ 
+-        if (!currentSessionId || currentSessionId.startsWith('new-session-')) {
++        if (isBuilderSessionId(newSessionId)) {
++          sessionStorage.setItem('pendingSessionId', newSessionId);
++          if (pendingViewSessionRef.current) {
++            pendingViewSessionRef.current.sessionId = newSessionId;
++          } else {
++            pendingViewSessionRef.current = { sessionId: newSessionId, startedAt: Date.now() };
++          }
++          setCurrentSessionId(newSessionId);
++          onReplaceTemporarySession?.(newSessionId);
++        } else if (!currentSessionId || currentSessionId.startsWith('new-session-')) {
+           sessionStorage.setItem('pendingSessionId', newSessionId);
+           if (pendingViewSessionRef.current && !pendingViewSessionRef.current.sessionId) {
+             pendingViewSessionRef.current.sessionId = newSessionId;
+@@ -298,6 +308,10 @@ export function useChatRealtimeHandlers({
+ 
+       case 'permission_request': {
+         if (!msg.requestId) break;
++        if (msg.source === 'builder' && sid && sid !== activeViewSessionId) {
++          setCurrentSessionId(sid);
++          onNavigateToSession?.(sid);
++        }
+         setPendingPermissionRequests((prev) => {
+           if (prev.some((r: PendingPermissionRequest) => r.requestId === msg.requestId)) return prev;
+           return [...prev, {

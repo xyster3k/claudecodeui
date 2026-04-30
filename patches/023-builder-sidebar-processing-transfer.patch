@@ -1,0 +1,59 @@
+diff --git a/src/components/chat/hooks/useChatComposerState.ts b/src/components/chat/hooks/useChatComposerState.ts
+--- a/src/components/chat/hooks/useChatComposerState.ts
++++ b/src/components/chat/hooks/useChatComposerState.ts
+@@ -575,9 +575,7 @@ export function useChatComposerState({
+         pendingViewSessionRef.current = { sessionId: null, startedAt: Date.now() };
+       }
+       onSessionActive?.(sessionToActivate);
+-      if (effectiveSessionId && !isTemporarySessionId(effectiveSessionId)) {
+-        onSessionProcessing?.(effectiveSessionId);
+-      }
++      onSessionProcessing?.(sessionToActivate);
+ 
+       const getToolsSettings = () => {
+         try {
+diff --git a/src/components/chat/hooks/useChatRealtimeHandlers.ts b/src/components/chat/hooks/useChatRealtimeHandlers.ts
+--- a/src/components/chat/hooks/useChatRealtimeHandlers.ts
++++ b/src/components/chat/hooks/useChatRealtimeHandlers.ts
+@@ -239,12 +239,14 @@ export function useChatRealtimeHandlers({
+           }
+           setCurrentSessionId(newSessionId);
+           onReplaceTemporarySession?.(newSessionId);
++          onSessionProcessing?.(newSessionId);
+         } else if (!currentSessionId || currentSessionId.startsWith('new-session-')) {
+           sessionStorage.setItem('pendingSessionId', newSessionId);
+           if (pendingViewSessionRef.current && !pendingViewSessionRef.current.sessionId) {
+             pendingViewSessionRef.current.sessionId = newSessionId;
+           }
+           setCurrentSessionId(newSessionId);
+           onReplaceTemporarySession?.(newSessionId);
++          onSessionProcessing?.(newSessionId);
+           setPendingPermissionRequests((prev) =>
+             prev.map((r) => (r.sessionId ? r : { ...r, sessionId: newSessionId })),
+           );
+diff --git a/src/hooks/useSessionProtection.ts b/src/hooks/useSessionProtection.ts
+--- a/src/hooks/useSessionProtection.ts
++++ b/src/hooks/useSessionProtection.ts
+@@ -59,6 +59,22 @@ export function useSessionProtection() {
+       next.add(realSessionId);
+       return next;
+     });
++
++    setProcessingSessions((prev) => {
++      const next = new Set<string>();
++      let replacedTemporary = false;
++      for (const sessionId of prev) {
++        if (sessionId.startsWith('new-session-')) {
++          replacedTemporary = true;
++          continue;
++        }
++        next.add(sessionId);
++      }
++      if (replacedTemporary) {
++        next.add(realSessionId);
++      }
++      return next;
++    });
+   }, []);
+ 
+   return {

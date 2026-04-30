@@ -1,12 +1,12 @@
 diff --git a/server/index.js b/server/index.js
-index 62d8513..d7494eb 100755
+index 62d8513..0ad5c62 100755
 --- a/server/index.js
 +++ b/server/index.js
 @@ -33,6 +33,7 @@ import { queryClaudeSDK, abortClaudeSDKSession, isClaudeSDKSessionActive, getAct
  import { spawnCursor, abortCursorSession, isCursorSessionActive, getActiveCursorSessions } from './cursor-cli.js';
  import { queryCodex, abortCodexSession, isCodexSessionActive, getActiveCodexSessions } from './openai-codex.js';
  import { spawnGemini, abortGeminiSession, isGeminiSessionActive, getActiveGeminiSessions } from './gemini-cli.js';
-+import { runBuilderWorkflow } from './builder-mode.js';
++import { resolveBuilderApproval, runBuilderWorkflow } from './builder-mode.js';
  import sessionManager from './sessionManager.js';
  import gitRoutes from './routes/git.js';
  import authRoutes from './routes/auth.js';
@@ -39,8 +39,22 @@ index 62d8513..d7494eb 100755
  
              if (data.type === 'claude-command') {
                  console.log('[DEBUG] User message:', data.command || '[Continue/Resume]');
+@@ -1465,6 +1488,13 @@ function handleChatConnection(ws, request) {
+                         rememberEntry: data.rememberEntry
+                     });
+                 }
++            } else if (data.type === 'builder-approval-response') {
++                if (data.requestId) {
++                    resolveBuilderApproval(data.requestId, {
++                        allow: Boolean(data.allow),
++                        message: data.message,
++                    });
++                }
+             } else if (data.type === 'cursor-abort') {
+                 console.log('[DEBUG] Abort Cursor session:', data.sessionId);
+                 const success = abortCursorSession(data.sessionId);
 diff --git a/src/components/chat/hooks/useChatComposerState.ts b/src/components/chat/hooks/useChatComposerState.ts
-index 3b16721..0cb27f1 100644
+index 3b16721..16c245d 100644
 --- a/src/components/chat/hooks/useChatComposerState.ts
 +++ b/src/components/chat/hooks/useChatComposerState.ts
 @@ -18,6 +18,7 @@ import type {
@@ -51,7 +65,23 @@ index 3b16721..0cb27f1 100644
  } from '../types/types';
  import type { Project, ProjectSession, LLMProvider } from '../../../types/app';
  import { escapeRegExp } from '../utils/chatFormatting';
-@@ -144,6 +145,13 @@ export function useChatComposerState({
+@@ -59,6 +60,7 @@ interface UseChatComposerStateArgs {
+   setCanAbortSession: (canAbort: boolean) => void;
+   setClaudeStatus: (status: { text: string; tokens: number; can_interrupt: boolean } | null) => void;
+   setIsUserScrolledUp: (isScrolledUp: boolean) => void;
++  pendingPermissionRequests: PendingPermissionRequest[];
+   setPendingPermissionRequests: Dispatch<SetStateAction<PendingPermissionRequest[]>>;
+ }
+ 
+@@ -131,6 +133,7 @@ export function useChatComposerState({
+   setCanAbortSession,
+   setClaudeStatus,
+   setIsUserScrolledUp,
++  pendingPermissionRequests,
+   setPendingPermissionRequests,
+ }: UseChatComposerStateArgs) {
+   const [input, setInput] = useState(() => {
+@@ -144,6 +147,13 @@ export function useChatComposerState({
    const [imageErrors, setImageErrors] = useState<Map<string, string>>(new Map());
    const [isTextareaExpanded, setIsTextareaExpanded] = useState(false);
    const [thinkingMode, setThinkingMode] = useState('none');
@@ -65,7 +95,7 @@ index 3b16721..0cb27f1 100644
  
    const textareaRef = useRef<HTMLTextAreaElement>(null);
    const inputHighlightRef = useRef<HTMLDivElement>(null);
-@@ -605,6 +613,7 @@ export function useChatComposerState({
+@@ -605,6 +615,7 @@ export function useChatComposerState({
              skipPermissions: toolsSettings?.skipPermissions || false,
              sessionSummary,
              toolsSettings,
@@ -73,7 +103,7 @@ index 3b16721..0cb27f1 100644
            },
          });
        } else if (provider === 'codex') {
-@@ -620,6 +629,7 @@ export function useChatComposerState({
+@@ -620,6 +631,7 @@ export function useChatComposerState({
              model: codexModel,
              sessionSummary,
              permissionMode: permissionMode === 'plan' ? 'default' : permissionMode,
@@ -81,7 +111,7 @@ index 3b16721..0cb27f1 100644
            },
          });
        } else if (provider === 'gemini') {
-@@ -636,6 +646,7 @@ export function useChatComposerState({
+@@ -636,6 +648,7 @@ export function useChatComposerState({
              sessionSummary,
              permissionMode,
              toolsSettings,
@@ -89,7 +119,7 @@ index 3b16721..0cb27f1 100644
            },
          });
        } else {
-@@ -652,6 +663,7 @@ export function useChatComposerState({
+@@ -652,6 +665,7 @@ export function useChatComposerState({
              model: claudeModel,
              sessionSummary,
              images: uploadedImages,
@@ -97,7 +127,7 @@ index 3b16721..0cb27f1 100644
            },
          });
        }
-@@ -697,6 +709,7 @@ export function useChatComposerState({
+@@ -697,6 +711,7 @@ export function useChatComposerState({
        setIsUserScrolledUp,
        slashCommands,
        thinkingMode,
@@ -105,7 +135,7 @@ index 3b16721..0cb27f1 100644
      ],
    );
  
-@@ -731,6 +744,21 @@ export function useChatComposerState({
+@@ -731,6 +746,21 @@ export function useChatComposerState({
      }
    }, [input, selectedProject]);
  
@@ -127,7 +157,7 @@ index 3b16721..0cb27f1 100644
    useEffect(() => {
      if (!textareaRef.current) {
        return;
-@@ -878,6 +906,10 @@ export function useChatComposerState({
+@@ -878,6 +908,10 @@ export function useChatComposerState({
      });
    }, [canAbortSession, currentSessionId, pendingViewSessionRef, provider, selectedSession?.id, sendMessage]);
  
@@ -138,7 +168,27 @@ index 3b16721..0cb27f1 100644
    const handleGrantToolPermission = useCallback(
      (suggestion: { entry: string; toolName: string }) => {
        if (!suggestion || provider !== 'claude') {
-@@ -970,6 +1002,8 @@ export function useChatComposerState({
+@@ -900,8 +934,9 @@ export function useChatComposerState({
+       }
+ 
+       validIds.forEach((requestId) => {
++        const request = pendingPermissionRequests.find((item) => item.requestId === requestId);
+         sendMessage({
+-          type: 'claude-permission-response',
++          type: request?.source === 'builder' ? 'builder-approval-response' : 'claude-permission-response',
+           requestId,
+           allow: Boolean(decision?.allow),
+           updatedInput: decision?.updatedInput,
+@@ -918,7 +953,7 @@ export function useChatComposerState({
+         return next;
+       });
+     },
+-    [sendMessage, setClaudeStatus, setPendingPermissionRequests],
++    [pendingPermissionRequests, sendMessage, setClaudeStatus, setPendingPermissionRequests],
+   );
+ 
+   const [isInputFocused, setIsInputFocused] = useState(false);
+@@ -970,6 +1005,8 @@ export function useChatComposerState({
      syncInputOverlayScroll,
      handleClearInput,
      handleAbortSession,
@@ -147,8 +197,20 @@ index 3b16721..0cb27f1 100644
      handlePermissionDecision,
      handleGrantToolPermission,
      handleInputFocusChange,
+diff --git a/src/components/chat/hooks/useChatRealtimeHandlers.ts b/src/components/chat/hooks/useChatRealtimeHandlers.ts
+index 73d1a5e..6490fcc 100644
+--- a/src/components/chat/hooks/useChatRealtimeHandlers.ts
++++ b/src/components/chat/hooks/useChatRealtimeHandlers.ts
+@@ -303,6 +303,7 @@ export function useChatRealtimeHandlers({
+           return [...prev, {
+             requestId: msg.requestId,
+             toolName: msg.toolName || 'UnknownTool',
++            source: msg.source === 'builder' ? 'builder' : 'claude',
+             input: msg.input,
+             context: msg.context,
+             sessionId: sid || null,
 diff --git a/src/components/chat/types/types.ts b/src/components/chat/types/types.ts
-index 900028c..8ce9a07 100644
+index 900028c..da76281 100644
 --- a/src/components/chat/types/types.ts
 +++ b/src/components/chat/types/types.ts
 @@ -3,6 +3,7 @@ import type { Project, ProjectSession, LLMProvider } from '../../../types/app';
@@ -159,8 +221,16 @@ index 900028c..8ce9a07 100644
  
  export interface ChatImage {
    data: string;
+@@ -73,6 +74,7 @@ export interface PermissionGrantResult {
+ export interface PendingPermissionRequest {
+   requestId: string;
+   toolName: string;
++  source?: 'claude' | 'builder';
+   input?: unknown;
+   context?: unknown;
+   sessionId?: string | null;
 diff --git a/src/components/chat/view/ChatInterface.tsx b/src/components/chat/view/ChatInterface.tsx
-index 1b3ae95..72d34c3 100644
+index 1b3ae95..107ebf0 100644
 --- a/src/components/chat/view/ChatInterface.tsx
 +++ b/src/components/chat/view/ChatInterface.tsx
 @@ -168,6 +168,8 @@ function ChatInterface({
@@ -172,7 +242,15 @@ index 1b3ae95..72d34c3 100644
      handlePermissionDecision,
      handleGrantToolPermission,
      handleInputFocusChange,
-@@ -354,6 +356,8 @@ function ChatInterface({
+@@ -202,6 +204,7 @@ function ChatInterface({
+     setCanAbortSession,
+     setClaudeStatus,
+     setIsUserScrolledUp,
++    pendingPermissionRequests,
+     setPendingPermissionRequests,
+   });
+ 
+@@ -354,6 +357,8 @@ function ChatInterface({
            claudeStatus={claudeStatus}
            isLoading={isLoading}
            onAbortSession={handleAbortSession}
@@ -181,7 +259,7 @@ index 1b3ae95..72d34c3 100644
            provider={provider}
            permissionMode={permissionMode}
            onModeSwitch={cyclePermissionMode}
-@@ -401,7 +405,7 @@ function ChatInterface({
+@@ -401,7 +406,7 @@ function ChatInterface({
            onTextareaScrollSync={syncInputOverlayScroll}
            onTextareaInput={handleTextareaInput}
            onInputFocusChange={handleInputFocusChange}

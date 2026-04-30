@@ -1,0 +1,782 @@
+diff --git a/server/builder-mode.js b/server/builder-mode.js
+index 73765f8..4b313c8 100644
+--- a/server/builder-mode.js
++++ b/server/builder-mode.js
+@@ -35,6 +35,8 @@ const QA_PROVIDER_FALLBACKS = {
+   cursor: ['codex', 'claude'],
+   gemini: ['codex', 'claude'],
+ };
++const DEFAULT_MAX_TASK_PASSES = 3;
++const DEFAULT_MAX_SLICE_REVIEWER_PASSES = 1;
+ 
+ const PROVIDER_RUNNERS = {
+   claude: queryClaudeSDK,
+@@ -51,6 +53,7 @@ const PROVIDER_ABORTERS = {
+ 
+ const builderApprovalRequests = new Map();
+ const activeBuilderRuns = new Map();
++const plannerControlSessions = new Map();
+ 
+ const sendNormalized = (writer, fields) => {
+   writer.send(createNormalizedMessage(fields));
+@@ -233,6 +236,14 @@ export function isBuilderWorkflowActive(sessionId) {
+   return activeBuilderRuns.has(sessionId);
+ }
+ 
++export function resolveBuilderAbortTarget(sessionId) {
++  if (activeBuilderRuns.has(sessionId)) {
++    return sessionId;
++  }
++
++  return plannerControlSessions.get(sessionId) || null;
++}
++
+ export async function abortBuilderWorkflow(sessionId) {
+   const run = activeBuilderRuns.get(sessionId);
+   if (!run) {
+@@ -241,8 +252,9 @@ export async function abortBuilderWorkflow(sessionId) {
+ 
+   run.aborted = true;
+   const childSessions = [...run.childSessions.entries()].filter(([childSessionId]) => Boolean(childSessionId));
+-  const results = await Promise.all(childSessions.map(async ([childSessionId, childProvider]) => {
++  const results = await Promise.all(childSessions.map(async ([childSessionId, metadata]) => {
+     try {
++      const childProvider = metadata?.provider || run.provider;
+       const aborter = PROVIDER_ABORTERS[childProvider] || PROVIDER_ABORTERS[run.provider];
+       const outcome = await aborter?.(childSessionId);
+       return Boolean(outcome);
+@@ -332,6 +344,7 @@ const mergeBuilderConfig = (...configs) => configs.reduce((acc, item) => {
+     approvals: { ...(acc.approvals || {}), ...(item.approvals || {}) },
+     reasoning: { ...(acc.reasoning || {}), ...(item.reasoning || {}) },
+     qa: { ...(acc.qa || {}), ...(item.qa || {}) },
++    supervision: { ...(acc.supervision || {}), ...(item.supervision || {}) },
+     merge: { ...(acc.merge || {}), ...(item.merge || {}) },
+     production: { ...(acc.production || {}), ...(item.production || {}) },
+   };
+@@ -367,6 +380,12 @@ const withDefaultBuilderConfig = (config = {}) => ({
+     requireDifferentProvider: true,
+     ...(config.qa || {}),
+   },
++  supervision: {
++    plannerCheckpointReview: true,
++    maxTaskPasses: DEFAULT_MAX_TASK_PASSES,
++    maxSliceReviewerPasses: DEFAULT_MAX_SLICE_REVIEWER_PASSES,
++    ...(config.supervision || {}),
++  },
+   merge: {
+     command: null,
+     branch: 'main',
+@@ -387,6 +406,15 @@ const clampParallelWorkers = (value) => {
+   return Math.min(MAX_PARALLEL_WORKERS_LIMIT, Math.floor(numeric));
+ };
+ 
++const clampInteger = (value, fallback, min, max) => {
++  const numeric = Number(value);
++  if (!Number.isFinite(numeric)) {
++    return fallback;
++  }
++
++  return Math.min(max, Math.max(min, Math.floor(numeric)));
++};
++
+ const buildPrdMarkdown = ({
+   command,
+   projectPath,
+@@ -462,6 +490,11 @@ const persistRunArtifacts = async (projectPath, sessionId, prdMarkdown, tasks, c
+       allowEdits: true,
+       requireDifferentProvider: true,
+     },
++    supervision: {
++      plannerCheckpointReview: true,
++      maxTaskPasses: 3,
++      maxSliceReviewerPasses: 1,
++    },
+     merge: {
+       command: 'git push origin HEAD:main',
+       branch: 'main',
+@@ -568,10 +601,214 @@ const runItemsWithConcurrency = async (items, limit, worker) => {
+ const formatWorkerResults = (results) => results.map((result) => [
+   `### Worker ${result.task.id}: ${result.task.title}`,
+   `Status: ${result.ok ? 'completed' : 'failed'}`,
++  result.acceptedByPlanner ? 'Planner verdict: accepted' : '',
++  result.reviewTrail?.length ? `Planner review trail: ${result.reviewTrail.map((entry) => `${entry.executor}:${entry.decision}`).join(' -> ')}` : '',
+   result.summary ? result.summary : 'No worker summary captured.',
+   result.errors.length > 0 ? `Errors: ${result.errors.join(' | ')}` : '',
+ ].filter(Boolean).join('\n')).join('\n\n');
+ 
++const summarizeTaskDefinition = (task) => [
++  `Task ${task.id}: ${task.title}`,
++  task.details ? `Details: ${task.details}` : '',
++  task.ownership ? `Ownership: ${task.ownership}` : '',
++  task.priority ? `Priority: ${task.priority}` : '',
++].filter(Boolean).join('\n');
++
++const mergeTaskDefinition = (task, update) => {
++  if (!update || typeof update !== 'object') {
++    return task;
++  }
++
++  const normalized = normalizePlannerTasks([{
++    ...task,
++    title: readString(update.title) || task.title,
++    details: readString(update.details) || task.details,
++    ownership: readString(update.ownership) || task.ownership,
++    priority: readString(update.priority) || task.priority,
++  }], 1)[0];
++
++  return normalized
++    ? { ...task, ...normalized, id: task.id }
++    : task;
++};
++
++const formatAcceptedTaskStates = (acceptedTasks) => {
++  if (!Array.isArray(acceptedTasks) || acceptedTasks.length === 0) {
++    return '- None accepted yet.';
++  }
++
++  return acceptedTasks.map((entry) => [
++    `- Task ${entry.task.id}: ${entry.task.title}`,
++    entry.reason ? `  Planner reason: ${entry.reason}` : '',
++    entry.summary ? `  Accepted summary: ${truncateOutput(entry.summary, 600)}` : '',
++  ].filter(Boolean).join('\n')).join('\n');
++};
++
++const createSerializedRunner = () => {
++  let chain = Promise.resolve();
++
++  return async (fn) => {
++    const scheduled = chain.then(fn, fn);
++    chain = scheduled.then(() => undefined, () => undefined);
++    return scheduled;
++  };
++};
++
++const buildSliceExecutionPrompt = ({
++  actorLabel,
++  actorRole,
++  projectPath,
++  command,
++  prdMarkdown,
++  task,
++  plannerFeedback,
++  previousSummary,
++}) => [
++  `You are ${actorLabel} in a coordinated builder run.`,
++  `Role: ${actorRole}`,
++  `Project root: ${projectPath}`,
++  '',
++  'Global request:',
++  command,
++  '',
++  'Full PRD:',
++  prdMarkdown,
++  '',
++  'Owned slice:',
++  summarizeTaskDefinition(task),
++  '',
++  plannerFeedback ? `Planner feedback for this pass:\n${plannerFeedback}` : '',
++  previousSummary ? `Latest prior implementation summary:\n${truncateOutput(previousSummary, 1200)}` : '',
++  '',
++  'Rules:',
++  '- You know the whole project context, but you own this slice.',
++  '- Other workers may edit the repository in parallel. Do not revert unrelated changes.',
++  '- Keep changes tightly scoped to this slice and shared touch points that are strictly necessary.',
++  '- Make code changes directly in the project.',
++  '- Avoid broad formatting-only edits.',
++  actorRole === 'slice reviewer'
++    ? '- Inspect the current repository state, verify this slice against the planner feedback, and make targeted corrective edits only where needed.'
++    : '- Leave broader cross-slice cleanup for the final integrator unless it blocks this slice.',
++  '- End with a concise summary of what you changed, what remains risky, and which files you touched.',
++].filter(Boolean).join('\n');
++
++const buildPlannerCheckpointPrompt = ({
++  command,
++  projectPath,
++  prdMarkdown,
++  task,
++  passNumber,
++  executorLabel,
++  executorProvider,
++  executorModel,
++  executorSummary,
++  executorErrors,
++  acceptedTasks,
++  reviewerAvailable,
++  reviewerLabel,
++}) => [
++  'You are the supervising planner for a coordinated builder run.',
++  `Project root: ${projectPath}`,
++  '',
++  'Original request:',
++  command,
++  '',
++  'Full PRD:',
++  prdMarkdown,
++  '',
++  'Task under review:',
++  summarizeTaskDefinition(task),
++  '',
++  `Pass number: ${passNumber}`,
++  `Executor: ${executorLabel}`,
++  `Executor provider: ${executorProvider || 'unknown'}`,
++  `Executor model: ${executorModel || 'default'}`,
++  reviewerAvailable
++    ? `Independent slice reviewer available: ${reviewerLabel}`
++    : 'Independent slice reviewer available: no',
++  '',
++  'Accepted slices so far:',
++  formatAcceptedTaskStates(acceptedTasks),
++  '',
++  'Executor summary:',
++  executorSummary ? truncateOutput(executorSummary, 2400) : 'No executor summary captured.',
++  executorErrors.length > 0 ? `Executor errors: ${executorErrors.join(' | ')}` : '',
++  '',
++  'Decision rules:',
++  '- Choose "accept" only if this slice materially satisfies the assigned task and can move forward.',
++  '- Choose "rework" if the task needs another implementation pass with clearer direction.',
++  '- Choose "reviewer" if an independent higher-tier reviewer should inspect and fix this slice before it can be accepted.',
++  '- Keep feedback concrete and scoped to this slice.',
++  '- If you update the task, keep the ownership boundary clear.',
++  '',
++  'Return only valid JSON in this shape:',
++  '```json',
++  JSON.stringify({
++    decision: 'accept',
++    reason: 'string',
++    feedback: 'string',
++    updated_task: {
++      title: 'string',
++      details: 'string',
++      ownership: 'string',
++      priority: 'high',
++    },
++  }, null, 2),
++  '```',
++].filter(Boolean).join('\n');
++
++const normalizePlannerCheckpointDecision = (value) => {
++  const normalized = readString(value)?.toLowerCase();
++  if (!normalized) {
++    return null;
++  }
++
++  if (['accept', 'accepted', 'approve', 'approved'].includes(normalized)) {
++    return 'accept';
++  }
++  if (['rework', 'revise', 'retry', 'continue', 'worker'].includes(normalized)) {
++    return 'rework';
++  }
++  if (['reviewer', 'review', 'escalate', 'qa'].includes(normalized)) {
++    return 'reviewer';
++  }
++
++  return null;
++};
++
++const parsePlannerCheckpointOutput = ({
++  text,
++  task,
++  fallbackDecision = 'accept',
++  reviewerAvailable = true,
++}) => {
++  const fallback = {
++    decision: !reviewerAvailable && fallbackDecision === 'reviewer' ? 'rework' : fallbackDecision,
++    reason: 'Planner review did not return structured JSON. Falling back to a default checkpoint decision.',
++    feedback: '',
++    updatedTask: task,
++  };
++
++  const jsonBlock = extractJsonBlock(text);
++  if (!jsonBlock) {
++    return fallback;
++  }
++
++  try {
++    const parsed = JSON.parse(stripCodeFences(jsonBlock));
++    const decision = normalizePlannerCheckpointDecision(parsed?.decision) || fallback.decision;
++    const updatedTask = mergeTaskDefinition(task, parsed?.updated_task || parsed?.updatedTask);
++    return {
++      decision: !reviewerAvailable && decision === 'reviewer' ? 'rework' : decision,
++      reason: readString(parsed?.reason) || fallback.reason,
++      feedback: readString(parsed?.feedback) || '',
++      updatedTask,
++    };
++  } catch {
++    return fallback;
++  }
++};
++
+ const normalizePlannerTasks = (tasks, maxWorkers) => {
+   const normalized = Array.isArray(tasks)
+     ? tasks.map((task, index) => {
+@@ -755,6 +992,14 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       || defaultWorkerModelForProvider(provider, options.model);
+     const integratorModel = builderConfig.orchestration.integratorModel
+       || defaultPlannerModelForProvider(provider, options.model);
++    const plannerCheckpointReview = builderConfig.supervision.plannerCheckpointReview !== false;
++    const maxTaskPasses = clampInteger(builderConfig.supervision.maxTaskPasses, DEFAULT_MAX_TASK_PASSES, 1, 6);
++    const maxSliceReviewerPasses = clampInteger(
++      builderConfig.supervision.maxSliceReviewerPasses,
++      DEFAULT_MAX_SLICE_REVIEWER_PASSES,
++      0,
++      3,
++    );
+     const plannerReasoning = normalizeReasoningLevel(builderConfig.reasoning.planner, DEFAULT_STAGE_REASONING.planner);
+     const workerReasoning = normalizeReasoningLevel(builderConfig.reasoning.worker, DEFAULT_STAGE_REASONING.worker);
+     const integratorReasoning = normalizeReasoningLevel(builderConfig.reasoning.integrator, DEFAULT_STAGE_REASONING.integrator);
+@@ -772,13 +1017,22 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+ 
+     sendTaskUpdate(writer, sessionId, provider, 'Planner inspecting current project state', 'in_progress');
+ 
+-    const registerChildSession = (childSessionId, childProvider = provider) => {
++    const registerChildSession = (childSessionId, childProvider = provider, role = 'worker') => {
+       if (childSessionId) {
+-        runState.childSessions.set(childSessionId, childProvider || provider);
++        const metadata = {
++          provider: childProvider || provider,
++          role,
++        };
++        runState.childSessions.set(childSessionId, metadata);
++        if (role === 'planner') {
++          plannerControlSessions.set(childSessionId, sessionId);
++        }
+       }
+     };
+ 
+-    const plannerWriter = new BufferedWriter(`${sessionId}-planner`, provider, registerChildSession);
++    const plannerWriter = new BufferedWriter(`${sessionId}-planner`, provider, (childSessionId, childProvider) => {
++      registerChildSession(childSessionId, childProvider, 'planner');
++    });
+     await runProviderTask({
+       provider,
+       prompt: applyReasoningPrefix(buildPlannerPrompt({
+@@ -809,6 +1063,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       maxWorkers,
+       parallelWorkers,
+     });
++    let plannerSessionId = plannerWriter.getSessionId();
+     const workerTasks = plannerResult.tasks;
+     const prdMarkdown = plannerResult.prdMarkdown;
+ 
+@@ -831,6 +1086,12 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+         provider: qaProvider,
+         model: qaModel,
+       },
++      supervision: {
++        ...builderConfig.supervision,
++        plannerCheckpointReview,
++        maxTaskPasses,
++        maxSliceReviewerPasses,
++      },
+     };
+ 
+     const { prdPath, tasksPath } = await persistRunArtifacts(projectPath, sessionId, prdMarkdown, workerTasks, effectiveConfig);
+@@ -845,6 +1106,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       `Worker model: \`${workerModel || options.model || 'default'}\``,
+       `Integrator model: \`${integratorModel || options.model || 'default'}\``,
+       `Reasoning profile: planner=${plannerReasoning}, worker=${workerReasoning}, integrator=${integratorReasoning}, qa=${qaReasoning}`,
++      `Planner supervision: ${plannerCheckpointReview ? `enabled (${maxTaskPasses} max pass(es) per task, ${maxSliceReviewerPasses} slice reviewer pass(es))` : 'disabled'}`,
+       !builderConfig.qa.enabled
+         ? 'QA stage: disabled by builder config'
+         : null,
+@@ -875,63 +1137,145 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       }
+     }
+ 
+-    sendTaskUpdate(writer, sessionId, provider, `Planner finished. Dispatching ${workerTasks.length} worker task(s) with concurrency ${parallelWorkers}`, 'in_progress');
+-
+-    const workerResults = await runItemsWithConcurrency(workerTasks, parallelWorkers, async (task, index) => {
++    const plannerCheckpointRunner = createSerializedRunner();
++    const acceptedTaskStates = [];
++    const reviewerProviderName = qaProvider || provider;
++    const reviewerModel = qaProvider ? qaModel : (integratorModel || plannerModel || options.model);
++    const reviewerReasoning = qaProvider ? qaReasoning : integratorReasoning;
++
++    const reviewTaskCheckpoint = async ({
++      task,
++      passNumber,
++      executorLabel,
++      executorProvider,
++      executorModel,
++      executorSummary,
++      executorErrors,
++      reviewerAvailable,
++      reviewerLabel,
++    }) => plannerCheckpointRunner(async () => {
+       if (runState.aborted) {
+         return {
+-          ok: false,
+-          task,
+-          summary: '',
+-          errors: ['Builder workflow aborted.'],
+-          childSessionId: `${sessionId}-worker-${index + 1}`,
++          decision: 'rework',
++          reason: 'Builder workflow aborted before planner checkpoint review.',
++          feedback: '',
++          updatedTask: task,
++          reviewText: '',
+         };
+       }
+ 
+-      const workerLabel = `Worker ${task.id}`;
+-      sendTaskUpdate(writer, sessionId, provider, `${workerLabel} started: ${task.title}`, 'in_progress');
++      sendTaskUpdate(writer, sessionId, provider, `Planner reviewing checkpoint for Task ${task.id}: ${task.title}`, 'in_progress');
+ 
+-      const workerWriter = new BufferedWriter(`${sessionId}-worker-${task.id}`, provider, registerChildSession);
+-      const prompt = [
+-        `You are ${workerLabel} in a coordinated builder run.`,
+-        `Project root: ${projectPath}`,
+-        '',
+-        'Global request:',
+-        command,
+-        '',
+-        'Full PRD:',
+-        prdMarkdown,
+-        '',
+-        `Your owned slice: ${task.title}`,
+-        task.ownership ? `Ownership boundary: ${task.ownership}` : '',
+-        task.details ? `Task details: ${task.details}` : '',
+-        '',
+-        'Rules:',
+-        '- You know the whole project context, but you own this slice.',
+-        '- Other workers may edit the repository in parallel. Do not revert unrelated changes.',
+-        '- Keep changes tightly scoped to your slice and shared touch points that are strictly necessary.',
+-        '- Make code changes directly in the project.',
+-        '- Avoid broad formatting-only edits.',
+-        '- Leave integration cleanup for the final integrator unless it blocks your slice.',
+-      ].join('\n');
++      const checkpointWriter = new BufferedWriter(plannerSessionId || `${sessionId}-planner`, provider, (childSessionId, childProvider) => {
++        registerChildSession(childSessionId, childProvider, 'planner');
++      });
++
++      await runProviderTask({
++        provider,
++        prompt: applyReasoningPrefix(buildPlannerCheckpointPrompt({
++          command,
++          projectPath,
++          prdMarkdown,
++          task,
++          passNumber,
++          executorLabel,
++          executorProvider,
++          executorModel,
++          executorSummary,
++          executorErrors,
++          acceptedTasks: acceptedTaskStates,
++          reviewerAvailable,
++          reviewerLabel,
++        }), plannerReasoning),
++        options: {
++          ...options,
++          cwd: projectPath,
++          projectPath,
++          model: plannerModel || options.model,
++          sessionId: plannerSessionId,
++          resume: Boolean(plannerSessionId),
++        },
++        writer: checkpointWriter,
++      });
++
++      plannerSessionId = checkpointWriter.getSessionId() || plannerSessionId;
++
++      const checkpointSummary = checkpointWriter.getSummary();
++      const decision = parsePlannerCheckpointOutput({
++        text: checkpointSummary.text,
++        task,
++        fallbackDecision: executorErrors.length > 0 ? 'rework' : 'accept',
++        reviewerAvailable,
++      });
++
++      if (decision.decision === 'accept') {
++        acceptedTaskStates.push({
++          task: decision.updatedTask,
++          reason: decision.reason,
++          summary: executorSummary,
++        });
++      }
++
++      return {
++        ...decision,
++        reviewText: checkpointSummary.text,
++      };
++    });
++
++    const runSlicePass = async ({
++      task,
++      actorType,
++      plannerFeedback,
++      previousSummary,
++      workerSessionId,
++      reviewerSessionId,
++    }) => {
++      const isReviewer = actorType === 'reviewer';
++      const actorProvider = isReviewer ? reviewerProviderName : provider;
++      const actorModel = isReviewer ? reviewerModel : (workerModel || options.model);
++      const actorReasoning = isReviewer ? reviewerReasoning : workerReasoning;
++      const actorLabel = isReviewer ? `Slice Reviewer ${task.id}` : `Worker ${task.id}`;
++      const actorRole = isReviewer ? 'slice reviewer' : 'worker';
++      const initialSessionId = isReviewer ? reviewerSessionId : workerSessionId;
++
++      sendTaskUpdate(writer, sessionId, provider, `${actorLabel} started: ${task.title}`, 'in_progress');
++
++      const actorWriter = new BufferedWriter(
++        initialSessionId || `${sessionId}-${actorType}-${task.id}`,
++        actorProvider,
++        (childSessionId, childProvider) => {
++          registerChildSession(childSessionId, childProvider, isReviewer ? 'reviewer' : 'worker');
++        },
++      );
+ 
+       try {
+         await runProviderTask({
+-          provider,
+-          prompt: applyReasoningPrefix(prompt, workerReasoning),
++          provider: actorProvider,
++          prompt: applyReasoningPrefix(buildSliceExecutionPrompt({
++            actorLabel,
++            actorRole,
++            projectPath,
++            command,
++            prdMarkdown,
++            task,
++            plannerFeedback,
++            previousSummary,
++          }), actorReasoning),
+           options: {
+             ...options,
+             cwd: projectPath,
+             projectPath,
+-            model: workerModel || options.model,
++            model: actorModel,
++            sessionId: initialSessionId,
++            resume: Boolean(initialSessionId),
+           },
+-          writer: workerWriter,
++          writer: actorWriter,
+         });
+ 
+-        const result = workerWriter.getSummary();
+-        sendTaskUpdate(writer, sessionId, provider, `${workerLabel} completed: ${task.title}`, 'completed');
++        const result = actorWriter.getSummary();
++        sendTaskUpdate(writer, sessionId, provider, `${actorLabel} completed: ${task.title}`, 'completed');
+         if (result.text) {
+-          sendAssistantText(writer, sessionId, provider, `### ${workerLabel} summary\n${result.text}`);
++          sendAssistantText(writer, sessionId, provider, `### ${actorLabel} summary\n${result.text}`);
+         }
+ 
+         return {
+@@ -939,19 +1283,164 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+           task,
+           summary: result.text,
+           errors: result.errors,
+-          childSessionId: result.sessionId || `${sessionId}-worker-${index + 1}`,
++          childSessionId: result.sessionId || initialSessionId || `${sessionId}-${actorType}-${task.id}`,
++          provider: actorProvider,
++          model: actorModel,
++          actorType,
+         };
+       } catch (error) {
+         const message = error instanceof Error ? error.message : String(error);
+-        sendAssistantText(writer, sessionId, provider, `### ${workerLabel} failed\n${message}`);
++        sendAssistantText(writer, sessionId, provider, `### ${actorLabel} failed\n${message}`);
+         return {
+           ok: false,
+           task,
+           summary: '',
+           errors: [message],
++          childSessionId: initialSessionId || `${sessionId}-${actorType}-${task.id}`,
++          provider: actorProvider,
++          model: actorModel,
++          actorType,
++        };
++      }
++    };
++
++    sendTaskUpdate(writer, sessionId, provider, `Planner finished. Dispatching ${workerTasks.length} worker task(s) with concurrency ${parallelWorkers}`, 'in_progress');
++
++    const workerResults = await runItemsWithConcurrency(workerTasks, parallelWorkers, async (task, index) => {
++      if (runState.aborted) {
++        return {
++          ok: false,
++          task,
++          summary: '',
++          errors: ['Builder workflow aborted.'],
+           childSessionId: `${sessionId}-worker-${index + 1}`,
++          reviewTrail: [],
+         };
+       }
++
++      let currentTask = task;
++      let workerSessionId = null;
++      let reviewerSessionId = null;
++      let previousSummary = '';
++      let plannerFeedback = '';
++      let nextActorType = 'worker';
++      let reviewerPassesUsed = 0;
++      const reviewTrail = [];
++
++      for (let passNumber = 1; passNumber <= maxTaskPasses; passNumber += 1) {
++        if (runState.aborted) {
++          return {
++            ok: false,
++            task: currentTask,
++            summary: previousSummary,
++            errors: ['Builder workflow aborted.'],
++            childSessionId: workerSessionId || `${sessionId}-worker-${index + 1}`,
++            reviewTrail,
++          };
++        }
++
++        const passResult = await runSlicePass({
++          task: currentTask,
++          actorType: nextActorType,
++          plannerFeedback,
++          previousSummary,
++          workerSessionId,
++          reviewerSessionId,
++        });
++
++        if (nextActorType === 'worker') {
++          workerSessionId = passResult.childSessionId || workerSessionId;
++        } else {
++          reviewerSessionId = passResult.childSessionId || reviewerSessionId;
++        }
++        previousSummary = passResult.summary || previousSummary;
++
++        if (!plannerCheckpointReview) {
++          return {
++            ...passResult,
++            task: currentTask,
++            acceptedByPlanner: false,
++            reviewTrail,
++          };
++        }
++
++        const reviewerAvailable = reviewerPassesUsed < maxSliceReviewerPasses && Boolean(reviewerModel);
++        const plannerDecision = await reviewTaskCheckpoint({
++          task: currentTask,
++          passNumber,
++          executorLabel: nextActorType === 'reviewer' ? `Slice Reviewer ${currentTask.id}` : `Worker ${currentTask.id}`,
++          executorProvider: passResult.provider,
++          executorModel: passResult.model,
++          executorSummary: passResult.summary,
++          executorErrors: passResult.errors,
++          reviewerAvailable,
++          reviewerLabel: reviewerAvailable ? `${reviewerProviderName}/${reviewerModel || 'default'}` : '',
++        });
++
++        currentTask = plannerDecision.updatedTask || currentTask;
++        reviewTrail.push({
++          executor: nextActorType,
++          decision: plannerDecision.decision,
++          reason: plannerDecision.reason,
++        });
++
++        sendAssistantText(writer, sessionId, provider, [
++          `### Planner checkpoint for Task ${currentTask.id}`,
++          `Decision: ${plannerDecision.decision}`,
++          plannerDecision.reason ? `Reason: ${plannerDecision.reason}` : '',
++          plannerDecision.feedback ? `Feedback: ${plannerDecision.feedback}` : '',
++        ].filter(Boolean).join('\n'));
++
++        if (runState.aborted) {
++          return {
++            ok: false,
++            task: currentTask,
++            summary: previousSummary,
++            errors: ['Builder workflow aborted.'],
++            childSessionId: passResult.childSessionId || `${sessionId}-worker-${index + 1}`,
++            reviewTrail,
++          };
++        }
++
++        if (plannerDecision.decision === 'accept') {
++          sendTaskUpdate(writer, sessionId, provider, `Planner accepted Task ${currentTask.id}: ${currentTask.title}`, 'completed');
++          return {
++            ...passResult,
++            ok: true,
++            task: currentTask,
++            summary: [
++              passResult.summary,
++              plannerDecision.reason ? `Planner acceptance: ${plannerDecision.reason}` : '',
++            ].filter(Boolean).join('\n\n'),
++            acceptedByPlanner: true,
++            reviewTrail,
++          };
++        }
++
++        if (plannerDecision.decision === 'reviewer' && reviewerAvailable) {
++          reviewerPassesUsed += 1;
++          plannerFeedback = [plannerDecision.reason, plannerDecision.feedback].filter(Boolean).join('\n\n');
++          nextActorType = 'reviewer';
++          sendTaskUpdate(writer, sessionId, provider, `Planner requested slice reviewer for Task ${currentTask.id}: ${currentTask.title}`, 'in_progress');
++          continue;
++        }
++
++        plannerFeedback = [plannerDecision.reason, plannerDecision.feedback].filter(Boolean).join('\n\n');
++        nextActorType = 'worker';
++        sendTaskUpdate(writer, sessionId, provider, `Planner requested rework for Task ${currentTask.id}: ${currentTask.title}`, 'in_progress');
++      }
++
++      const failureMessage = `Planner did not accept Task ${currentTask.id} within ${maxTaskPasses} pass(es).`;
++      sendAssistantText(writer, sessionId, provider, `### Planner checkpoint for Task ${currentTask.id}\n${failureMessage}`);
++      return {
++        ok: false,
++        task: currentTask,
++        summary: previousSummary,
++        errors: [failureMessage],
++        childSessionId: reviewerSessionId || workerSessionId || `${sessionId}-worker-${index + 1}`,
++        acceptedByPlanner: false,
++        reviewTrail,
++      };
+     });
+ 
+     if (runState.aborted) {
+@@ -1015,7 +1504,9 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+     if (builderConfig.qa.enabled && qaProvider && qaModel) {
+       sendTaskUpdate(writer, sessionId, provider, `Cross-provider QA started with ${qaProvider}`, 'in_progress');
+ 
+-      const qaWriter = new BufferedWriter(`${sessionId}-qa`, qaProvider, registerChildSession);
++      const qaWriter = new BufferedWriter(`${sessionId}-qa`, qaProvider, (childSessionId, childProvider) => {
++        registerChildSession(childSessionId, childProvider, 'qa');
++      });
+       await runProviderTask({
+         provider: qaProvider,
+         prompt: applyReasoningPrefix([
+@@ -1122,6 +1613,11 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+     sendAssistantText(writer, sessionId, provider, `Builder workflow failed.\n\n\`\`\`text\n${message}\n\`\`\``);
+     sendNormalized(writer, { kind: 'error', sessionId, provider, content: message });
+   } finally {
++    for (const [childSessionId, metadata] of runState.childSessions.entries()) {
++      if (metadata?.role === 'planner') {
++        plannerControlSessions.delete(childSessionId);
++      }
++    }
+     activeBuilderRuns.delete(sessionId);
+   }
+ }
+diff --git a/server/index.js b/server/index.js
+index 8dfddf9..36c8b96 100755
+--- a/server/index.js
++++ b/server/index.js
+@@ -33,7 +33,7 @@ import { queryClaudeSDK, abortClaudeSDKSession, isClaudeSDKSessionActive, getAct
+ import { spawnCursor, abortCursorSession, isCursorSessionActive, getActiveCursorSessions } from './cursor-cli.js';
+ import { queryCodex, abortCodexSession, isCodexSessionActive, getActiveCodexSessions } from './openai-codex.js';
+ import { spawnGemini, abortGeminiSession, isGeminiSessionActive, getActiveGeminiSessions } from './gemini-cli.js';
+-import { abortBuilderWorkflow, isBuilderWorkflowActive, resolveBuilderApproval, runBuilderWorkflow } from './builder-mode.js';
++import { abortBuilderWorkflow, resolveBuilderAbortTarget, resolveBuilderApproval, runBuilderWorkflow } from './builder-mode.js';
+ import sessionManager from './sessionManager.js';
+ import gitRoutes from './routes/git.js';
+ import authRoutes from './routes/auth.js';
+@@ -1474,8 +1474,9 @@ function handleChatConnection(ws, request) {
+                 const provider = data.provider || 'claude';
+                 let success;
+ 
+-                if (isBuilderWorkflowActive(data.sessionId)) {
+-                    success = await abortBuilderWorkflow(data.sessionId);
++                const builderAbortTarget = resolveBuilderAbortTarget(data.sessionId);
++                if (builderAbortTarget) {
++                    success = await abortBuilderWorkflow(builderAbortTarget);
+                 } else if (provider === 'cursor') {
+                     success = abortCursorSession(data.sessionId);
+                 } else if (provider === 'codex') {

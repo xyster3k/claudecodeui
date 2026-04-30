@@ -1,0 +1,413 @@
+diff --git a/server/builder-mode.js b/server/builder-mode.js
+index 12b817a..73765f8 100644
+--- a/server/builder-mode.js
++++ b/server/builder-mode.js
+@@ -7,6 +7,7 @@ import { abortClaudeSDKSession, queryClaudeSDK } from './claude-sdk.js';
+ import { abortCursorSession, spawnCursor } from './cursor-cli.js';
+ import { abortCodexSession, queryCodex } from './openai-codex.js';
+ import { abortGeminiSession, spawnGemini } from './gemini-cli.js';
++import { providerAuthService } from './modules/providers/services/provider-auth.service.js';
+ 
+ const TASKMASTER_DIR = '.taskmaster';
+ const BUILDER_ARTIFACT_DIR = '.cloudcli/builder-runs';
+@@ -16,6 +17,24 @@ const MAX_PARALLEL_WORKERS_LIMIT = 4;
+ const DEFAULT_PARALLEL_WORKERS = 2;
+ const DEFAULT_MAX_WORKERS = 6;
+ const RISKY_CHANGE_PATTERN = /\b(db|database|schema|migration|migrations|secret|secrets|env|environment variable|credential|credentials|token|api key)\b/i;
++const REASONING_PREFIXES = {
++  low: 'think',
++  medium: 'think hard',
++  high: 'think harder',
++  max: 'ultrathink',
++};
++const DEFAULT_STAGE_REASONING = {
++  planner: 'high',
++  worker: 'medium',
++  integrator: 'high',
++  qa: 'high',
++};
++const QA_PROVIDER_FALLBACKS = {
++  claude: ['codex'],
++  codex: ['claude'],
++  cursor: ['codex', 'claude'],
++  gemini: ['codex', 'claude'],
++};
+ 
+ const PROVIDER_RUNNERS = {
+   claude: queryClaudeSDK,
+@@ -122,6 +141,80 @@ const defaultWorkerModelForProvider = (provider, fallback) => {
+   return fallback || null;
+ };
+ 
++const defaultQaModelForProvider = (provider, fallback) => defaultPlannerModelForProvider(provider, fallback);
++
++const normalizeReasoningLevel = (value, fallback = 'medium') => {
++  const normalized = readString(value)?.toLowerCase();
++  if (normalized && Object.prototype.hasOwnProperty.call(REASONING_PREFIXES, normalized)) {
++    return normalized;
++  }
++
++  if (fallback && Object.prototype.hasOwnProperty.call(REASONING_PREFIXES, fallback)) {
++    return fallback;
++  }
++
++  return null;
++};
++
++const applyReasoningPrefix = (prompt, level) => {
++  const normalized = normalizeReasoningLevel(level, null);
++  const prefix = normalized ? REASONING_PREFIXES[normalized] : '';
++  const trimmed = typeof prompt === 'string' ? prompt.trim() : '';
++  if (!prefix || !trimmed) {
++    return trimmed;
++  }
++  return `${prefix}: ${trimmed}`;
++};
++
++const isProviderReady = async (providerName) => {
++  if (!providerName) {
++    return false;
++  }
++
++  try {
++    const status = await providerAuthService.getProviderAuthStatus(providerName);
++    return Boolean(status?.installed && status?.authenticated);
++  } catch {
++    return false;
++  }
++};
++
++const resolveQaProvider = async ({
++  primaryProvider,
++  configuredProvider,
++  requireDifferentProvider = true,
++}) => {
++  const preferred = readString(configuredProvider);
++  const candidates = [];
++
++  if (preferred) {
++    candidates.push(preferred);
++  } else {
++    candidates.push(...(QA_PROVIDER_FALLBACKS[primaryProvider] || ['codex', 'claude']));
++  }
++
++  if (!requireDifferentProvider || preferred === primaryProvider) {
++    candidates.push(primaryProvider);
++  }
++
++  const uniqueCandidates = [...new Set(candidates.filter((candidate) => candidate && PROVIDER_RUNNERS[candidate]))];
++  const eligibleCandidates = requireDifferentProvider
++    ? uniqueCandidates.filter((candidate) => candidate !== primaryProvider)
++    : uniqueCandidates;
++
++  for (const candidate of eligibleCandidates) {
++    if (await isProviderReady(candidate)) {
++      return candidate;
++    }
++  }
++
++  if (!requireDifferentProvider && await isProviderReady(primaryProvider)) {
++    return primaryProvider;
++  }
++
++  return null;
++};
++
+ export function resolveBuilderApproval(requestId, decision = {}) {
+   const pending = builderApprovalRequests.get(requestId);
+   if (!pending) {
+@@ -147,10 +240,10 @@ export async function abortBuilderWorkflow(sessionId) {
+   }
+ 
+   run.aborted = true;
+-  const aborter = PROVIDER_ABORTERS[run.provider];
+-  const childSessions = [...run.childSessions].filter(Boolean);
+-  const results = await Promise.all(childSessions.map(async (childSessionId) => {
++  const childSessions = [...run.childSessions.entries()].filter(([childSessionId]) => Boolean(childSessionId));
++  const results = await Promise.all(childSessions.map(async ([childSessionId, childProvider]) => {
+     try {
++      const aborter = PROVIDER_ABORTERS[childProvider] || PROVIDER_ABORTERS[run.provider];
+       const outcome = await aborter?.(childSessionId);
+       return Boolean(outcome);
+     } catch {
+@@ -237,6 +330,8 @@ const mergeBuilderConfig = (...configs) => configs.reduce((acc, item) => {
+     ...item,
+     orchestration: { ...(acc.orchestration || {}), ...(item.orchestration || {}) },
+     approvals: { ...(acc.approvals || {}), ...(item.approvals || {}) },
++    reasoning: { ...(acc.reasoning || {}), ...(item.reasoning || {}) },
++    qa: { ...(acc.qa || {}), ...(item.qa || {}) },
+     merge: { ...(acc.merge || {}), ...(item.merge || {}) },
+     production: { ...(acc.production || {}), ...(item.production || {}) },
+   };
+@@ -257,6 +352,21 @@ const withDefaultBuilderConfig = (config = {}) => ({
+     production: true,
+     ...(config.approvals || {}),
+   },
++  reasoning: {
++    planner: DEFAULT_STAGE_REASONING.planner,
++    worker: DEFAULT_STAGE_REASONING.worker,
++    integrator: DEFAULT_STAGE_REASONING.integrator,
++    qa: DEFAULT_STAGE_REASONING.qa,
++    ...(config.reasoning || {}),
++  },
++  qa: {
++    enabled: true,
++    provider: null,
++    model: null,
++    allowEdits: true,
++    requireDifferentProvider: true,
++    ...(config.qa || {}),
++  },
+   merge: {
+     command: null,
+     branch: 'main',
+@@ -330,7 +440,8 @@ const persistRunArtifacts = async (projectPath, sessionId, prdMarkdown, tasks, c
+     orchestration: {
+       maxParallelWorkers: 2,
+       maxWorkers: 6,
+-      workerModel: 'gpt-5.4-mini',
++      plannerModel: 'gpt-5.5',
++      workerModel: 'gpt-5.4',
+       integratorModel: 'gpt-5.5',
+     },
+     approvals: {
+@@ -338,6 +449,19 @@ const persistRunArtifacts = async (projectPath, sessionId, prdMarkdown, tasks, c
+       merge: true,
+       production: true,
+     },
++    reasoning: {
++      planner: 'high',
++      worker: 'medium',
++      integrator: 'high',
++      qa: 'high',
++    },
++    qa: {
++      enabled: true,
++      provider: 'claude',
++      model: 'opus',
++      allowEdits: true,
++      requireDifferentProvider: true,
++    },
+     merge: {
+       command: 'git push origin HEAD:main',
+       branch: 'main',
+@@ -376,10 +500,10 @@ class BufferedWriter {
+     this.sessionHistory.push(message);
+     if (message?.newSessionId) {
+       this.sessionId = message.newSessionId;
+-      this.onSessionId?.(this.sessionId);
++      this.onSessionId?.(this.sessionId, message?.provider || this.provider);
+     } else if (message?.sessionId) {
+       this.sessionId = message.sessionId;
+-      this.onSessionId?.(this.sessionId);
++      this.onSessionId?.(this.sessionId, message?.provider || this.provider);
+     }
+ 
+     if (typeof message?.content === 'string' && (message.kind === 'text' || message.kind === 'stream_delta')) {
+@@ -395,7 +519,7 @@ class BufferedWriter {
+ 
+   setSessionId(sessionId) {
+     this.sessionId = sessionId;
+-    this.onSessionId?.(sessionId);
++    this.onSessionId?.(sessionId, this.provider);
+   }
+ 
+   getSessionId() {
+@@ -413,7 +537,8 @@ class BufferedWriter {
+   }
+ }
+ 
+-const runProviderTask = async ({ runner, prompt, options, writer }) => {
++const runProviderTask = async ({ provider, prompt, options, writer }) => {
++  const runner = PROVIDER_RUNNERS[provider] || queryClaudeSDK;
+   await runner(prompt, {
+     ...options,
+     workflowMode: 'chat',
+@@ -601,11 +726,10 @@ const parsePlannerOutput = ({ text, command, projectPath, maxWorkers, parallelWo
+ export async function runBuilderWorkflow(command, options = {}, writer, provider = 'claude') {
+   const sessionId = `builder-${randomUUID()}`;
+   const projectPath = options.projectPath || options.cwd || process.cwd();
+-  const runner = PROVIDER_RUNNERS[provider] || queryClaudeSDK;
+   const runState = {
+     provider,
+     aborted: false,
+-    childSessions: new Set(),
++    childSessions: new Map(),
+   };
+   activeBuilderRuns.set(sessionId, runState);
+ 
+@@ -631,24 +755,38 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       || defaultWorkerModelForProvider(provider, options.model);
+     const integratorModel = builderConfig.orchestration.integratorModel
+       || defaultPlannerModelForProvider(provider, options.model);
++    const plannerReasoning = normalizeReasoningLevel(builderConfig.reasoning.planner, DEFAULT_STAGE_REASONING.planner);
++    const workerReasoning = normalizeReasoningLevel(builderConfig.reasoning.worker, DEFAULT_STAGE_REASONING.worker);
++    const integratorReasoning = normalizeReasoningLevel(builderConfig.reasoning.integrator, DEFAULT_STAGE_REASONING.integrator);
++    const qaReasoning = normalizeReasoningLevel(builderConfig.reasoning.qa, DEFAULT_STAGE_REASONING.qa);
++    const qaProvider = builderConfig.qa.enabled
++      ? await resolveQaProvider({
++        primaryProvider: provider,
++        configuredProvider: builderConfig.qa.provider,
++        requireDifferentProvider: Boolean(builderConfig.qa.requireDifferentProvider),
++      })
++      : null;
++    const qaModel = builderConfig.qa.enabled && qaProvider
++      ? (builderConfig.qa.model || defaultQaModelForProvider(qaProvider, options.model))
++      : null;
+ 
+     sendTaskUpdate(writer, sessionId, provider, 'Planner inspecting current project state', 'in_progress');
+ 
+-    const registerChildSession = (childSessionId) => {
++    const registerChildSession = (childSessionId, childProvider = provider) => {
+       if (childSessionId) {
+-        runState.childSessions.add(childSessionId);
++        runState.childSessions.set(childSessionId, childProvider || provider);
+       }
+     };
+ 
+     const plannerWriter = new BufferedWriter(`${sessionId}-planner`, provider, registerChildSession);
+     await runProviderTask({
+-      runner,
+-      prompt: buildPlannerPrompt({
++      provider,
++      prompt: applyReasoningPrefix(buildPlannerPrompt({
+         command,
+         projectPath,
+         maxWorkers,
+         parallelWorkers,
+-      }),
++      }), plannerReasoning),
+       options: {
+         ...options,
+         cwd: projectPath,
+@@ -682,6 +820,17 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+         workerModel,
+         integratorModel,
+       },
++      reasoning: {
++        planner: plannerReasoning,
++        worker: workerReasoning,
++        integrator: integratorReasoning,
++        qa: qaReasoning,
++      },
++      qa: {
++        ...builderConfig.qa,
++        provider: qaProvider,
++        model: qaModel,
++      },
+     };
+ 
+     const { prdPath, tasksPath } = await persistRunArtifacts(projectPath, sessionId, prdMarkdown, workerTasks, effectiveConfig);
+@@ -695,6 +844,15 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       `Parallel worker limit: ${parallelWorkers}`,
+       `Worker model: \`${workerModel || options.model || 'default'}\``,
+       `Integrator model: \`${integratorModel || options.model || 'default'}\``,
++      `Reasoning profile: planner=${plannerReasoning}, worker=${workerReasoning}, integrator=${integratorReasoning}, qa=${qaReasoning}`,
++      !builderConfig.qa.enabled
++        ? 'QA stage: disabled by builder config'
++        : null,
++      qaProvider
++        ? `QA stage: \`${qaProvider}\` with model \`${qaModel || 'default'}\``
++        : builderConfig.qa.enabled
++          ? 'QA stage: skipped because no alternate authenticated provider is currently available'
++          : null,
+     ].filter(Boolean).join('\n'));
+ 
+     if (builderConfig.approvals.riskyChanges && RISKY_CHANGE_PATTERN.test(command)) {
+@@ -759,8 +917,8 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+ 
+       try {
+         await runProviderTask({
+-          runner,
+-          prompt,
++          provider,
++          prompt: applyReasoningPrefix(prompt, workerReasoning),
+           options: {
+             ...options,
+             cwd: projectPath,
+@@ -816,8 +974,8 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+     sendTaskUpdate(writer, sessionId, provider, 'All workers completed. Starting final integration pass', 'in_progress');
+ 
+     await runProviderTask({
+-      runner,
+-      prompt: [
++      provider,
++      prompt: applyReasoningPrefix([
+         'You are the final integrator for a coordinated builder run.',
+         `Project root: ${projectPath}`,
+         '',
+@@ -838,7 +996,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+         '- Reconcile shared files and resolve inconsistencies between slices.',
+         '- Finish missing glue code, naming alignment, and shared state integration.',
+         '- Do not redo the whole feature from scratch. Integrate what exists.',
+-      ].join('\n'),
++      ].join('\n'), integratorReasoning),
+       options: {
+         ...options,
+         cwd: projectPath,
+@@ -854,6 +1012,65 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       return;
+     }
+ 
++    if (builderConfig.qa.enabled && qaProvider && qaModel) {
++      sendTaskUpdate(writer, sessionId, provider, `Cross-provider QA started with ${qaProvider}`, 'in_progress');
++
++      const qaWriter = new BufferedWriter(`${sessionId}-qa`, qaProvider, registerChildSession);
++      await runProviderTask({
++        provider: qaProvider,
++        prompt: applyReasoningPrefix([
++          'You are the final QA reviewer for a coordinated builder run.',
++          `Project root: ${projectPath}`,
++          `Primary build provider: ${provider}`,
++          `Your QA provider: ${qaProvider}`,
++          '',
++          'Original request:',
++          command,
++          '',
++          'Full PRD:',
++          prdMarkdown,
++          '',
++          'Worker results:',
++          formatWorkerResults(workerResults),
++          '',
++          'Context:',
++          '- The final integrator has already run.',
++          '- The repository as it exists right now is the source of truth.',
++          '',
++          'Requirements:',
++          '- Review the implementation for behavioral bugs, missing integration points, naming mismatches, regressions, and obvious edge cases.',
++          builderConfig.qa.allowEdits
++            ? '- When you find issues, fix them directly in the repository with targeted edits.'
++            : '- Report issues precisely and do not edit code.',
++          '- Prefer precise fixes over rewrites.',
++          '- Pay special attention to contracts and shared files touched by multiple workers.',
++          '- End with a concise QA summary of what you verified and what you changed.',
++        ].join('\n'), qaReasoning),
++        options: {
++          ...options,
++          cwd: projectPath,
++          projectPath,
++          model: qaModel,
++        },
++        writer: qaWriter,
++      });
++
++      if (runState.aborted) {
++        sendTaskUpdate(writer, sessionId, provider, 'Builder workflow aborted during cross-provider QA', 'failed');
++        sendNormalized(writer, { kind: 'complete', sessionId, provider, success: false, aborted: true, exitCode: 1 });
++        return;
++      }
++
++      const qaResult = qaWriter.getSummary();
++      sendTaskUpdate(writer, sessionId, provider, `Cross-provider QA completed with ${qaProvider}`, 'completed');
++      if (qaResult.text) {
++        sendAssistantText(writer, sessionId, provider, `### Cross-provider QA summary (${qaProvider})\n${qaResult.text}`);
++      }
++      if (qaResult.errors.length > 0) {
++        sendAssistantText(writer, sessionId, provider, `### Cross-provider QA warnings (${qaProvider})\n${qaResult.errors.join('\n')}`);
++      }
++    }
++
+     if (builderConfig.merge.command) {
+       const mergeApproval = await maybeApproveStage({
+         enabled: Boolean(builderConfig.approvals.merge),

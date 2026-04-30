@@ -1,5 +1,5 @@
 diff --git a/server/index.js b/server/index.js
-index 62d8513..0ad5c62 100755
+index 4a4e700..977ab71 100755
 --- a/server/index.js
 +++ b/server/index.js
 @@ -33,6 +33,7 @@ import { queryClaudeSDK, abortClaudeSDKSession, isClaudeSDKSessionActive, getAct
@@ -39,7 +39,7 @@ index 62d8513..0ad5c62 100755
  
              if (data.type === 'claude-command') {
                  console.log('[DEBUG] User message:', data.command || '[Continue/Resume]');
-@@ -1465,6 +1488,13 @@ function handleChatConnection(ws, request) {
+@@ -1475,6 +1498,13 @@ function handleChatConnection(ws, request) {
                          rememberEntry: data.rememberEntry
                      });
                  }
@@ -54,7 +54,7 @@ index 62d8513..0ad5c62 100755
                  console.log('[DEBUG] Abort Cursor session:', data.sessionId);
                  const success = abortCursorSession(data.sessionId);
 diff --git a/src/components/chat/hooks/useChatComposerState.ts b/src/components/chat/hooks/useChatComposerState.ts
-index 3b16721..16c245d 100644
+index 9fa2511..71516f5 100644
 --- a/src/components/chat/hooks/useChatComposerState.ts
 +++ b/src/components/chat/hooks/useChatComposerState.ts
 @@ -18,6 +18,7 @@ import type {
@@ -81,10 +81,10 @@ index 3b16721..16c245d 100644
    setPendingPermissionRequests,
  }: UseChatComposerStateArgs) {
    const [input, setInput] = useState(() => {
-@@ -144,6 +147,13 @@ export function useChatComposerState({
-   const [imageErrors, setImageErrors] = useState<Map<string, string>>(new Map());
-   const [isTextareaExpanded, setIsTextareaExpanded] = useState(false);
-   const [thinkingMode, setThinkingMode] = useState('none');
+@@ -155,6 +158,13 @@ export function useChatComposerState({
+       localStorage.setItem('cloudcli_thinking_mode', mode);
+     }
+   }, []);
 +  const [workflowMode, setWorkflowMode] = useState<WorkflowMode>(() => {
 +    if (typeof window === 'undefined' || !selectedProject) {
 +      return 'chat';
@@ -95,7 +95,7 @@ index 3b16721..16c245d 100644
  
    const textareaRef = useRef<HTMLTextAreaElement>(null);
    const inputHighlightRef = useRef<HTMLDivElement>(null);
-@@ -605,6 +615,7 @@ export function useChatComposerState({
+@@ -616,6 +626,7 @@ export function useChatComposerState({
              skipPermissions: toolsSettings?.skipPermissions || false,
              sessionSummary,
              toolsSettings,
@@ -103,7 +103,7 @@ index 3b16721..16c245d 100644
            },
          });
        } else if (provider === 'codex') {
-@@ -620,6 +631,7 @@ export function useChatComposerState({
+@@ -631,6 +642,7 @@ export function useChatComposerState({
              model: codexModel,
              sessionSummary,
              permissionMode: permissionMode === 'plan' ? 'default' : permissionMode,
@@ -111,7 +111,7 @@ index 3b16721..16c245d 100644
            },
          });
        } else if (provider === 'gemini') {
-@@ -636,6 +648,7 @@ export function useChatComposerState({
+@@ -647,6 +659,7 @@ export function useChatComposerState({
              sessionSummary,
              permissionMode,
              toolsSettings,
@@ -119,7 +119,7 @@ index 3b16721..16c245d 100644
            },
          });
        } else {
-@@ -652,6 +665,7 @@ export function useChatComposerState({
+@@ -663,6 +676,7 @@ export function useChatComposerState({
              model: claudeModel,
              sessionSummary,
              images: uploadedImages,
@@ -127,7 +127,7 @@ index 3b16721..16c245d 100644
            },
          });
        }
-@@ -697,6 +711,7 @@ export function useChatComposerState({
+@@ -707,6 +721,7 @@ export function useChatComposerState({
        setIsUserScrolledUp,
        slashCommands,
        thinkingMode,
@@ -135,9 +135,9 @@ index 3b16721..16c245d 100644
      ],
    );
  
-@@ -731,6 +746,21 @@ export function useChatComposerState({
-     }
-   }, [input, selectedProject]);
+@@ -718,6 +733,21 @@ export function useChatComposerState({
+     inputValueRef.current = input;
+   }, [input]);
  
 +  useEffect(() => {
 +    if (!selectedProject) {
@@ -155,11 +155,11 @@ index 3b16721..16c245d 100644
 +  }, [selectedProject?.name]);
 +
    useEffect(() => {
-     if (!textareaRef.current) {
+     if (!selectedProject) {
        return;
-@@ -878,6 +908,10 @@ export function useChatComposerState({
+@@ -884,6 +914,10 @@ export function useChatComposerState({
      });
-   }, [canAbortSession, currentSessionId, pendingViewSessionRef, provider, selectedSession?.id, sendMessage]);
+   }, [currentSessionId, pendingViewSessionRef, provider, selectedSession?.id, sendMessage]);
  
 +  const toggleWorkflowMode = useCallback(() => {
 +    setWorkflowMode((current) => (current === 'chat' ? 'builder' : 'chat'));
@@ -168,7 +168,7 @@ index 3b16721..16c245d 100644
    const handleGrantToolPermission = useCallback(
      (suggestion: { entry: string; toolName: string }) => {
        if (!suggestion || provider !== 'claude') {
-@@ -900,8 +934,9 @@ export function useChatComposerState({
+@@ -906,8 +940,9 @@ export function useChatComposerState({
        }
  
        validIds.forEach((requestId) => {
@@ -179,7 +179,7 @@ index 3b16721..16c245d 100644
            requestId,
            allow: Boolean(decision?.allow),
            updatedInput: decision?.updatedInput,
-@@ -918,7 +953,7 @@ export function useChatComposerState({
+@@ -924,7 +959,7 @@ export function useChatComposerState({
          return next;
        });
      },
@@ -188,7 +188,7 @@ index 3b16721..16c245d 100644
    );
  
    const [isInputFocused, setIsInputFocused] = useState(false);
-@@ -970,6 +1005,8 @@ export function useChatComposerState({
+@@ -976,6 +1011,8 @@ export function useChatComposerState({
      syncInputOverlayScroll,
      handleClearInput,
      handleAbortSession,
@@ -230,7 +230,7 @@ index 900028c..da76281 100644
    context?: unknown;
    sessionId?: string | null;
 diff --git a/src/components/chat/view/ChatInterface.tsx b/src/components/chat/view/ChatInterface.tsx
-index 1b3ae95..107ebf0 100644
+index 821efba..1b24048 100644
 --- a/src/components/chat/view/ChatInterface.tsx
 +++ b/src/components/chat/view/ChatInterface.tsx
 @@ -168,6 +168,8 @@ function ChatInterface({
@@ -269,7 +269,7 @@ index 1b3ae95..107ebf0 100644
                provider === 'cursor'
                  ? t('messageTypes.cursor')
 diff --git a/src/components/chat/view/subcomponents/ChatComposer.tsx b/src/components/chat/view/subcomponents/ChatComposer.tsx
-index e67ee64..1b57711 100644
+index 8cda4ac..7f8e786 100644
 --- a/src/components/chat/view/subcomponents/ChatComposer.tsx
 +++ b/src/components/chat/view/subcomponents/ChatComposer.tsx
 @@ -11,8 +11,8 @@ import type {

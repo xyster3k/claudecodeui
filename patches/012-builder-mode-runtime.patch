@@ -1,0 +1,634 @@
+diff --git a/server/builder-mode.js b/server/builder-mode.js
+new file mode 100644
+index 0000000..37c3d4e
+--- /dev/null
++++ b/server/builder-mode.js
+@@ -0,0 +1,628 @@
++import { randomUUID } from 'node:crypto';
++import { promises as fs } from 'node:fs';
++import path from 'node:path';
++
++import { createNormalizedMessage } from './shared/utils.js';
++import { queryClaudeSDK } from './claude-sdk.js';
++import { spawnCursor } from './cursor-cli.js';
++import { queryCodex } from './openai-codex.js';
++import { spawnGemini } from './gemini-cli.js';
++
++const TASKMASTER_DIR = '.taskmaster';
++const BUILDER_ARTIFACT_DIR = '.cloudcli/builder-runs';
++const GLOBAL_BUILDER_CONFIG_PATH = process.env.CLOUDCLI_BUILDER_CONFIG
++  || path.join(process.env.CLOUDCLI_HOME || path.join(process.env.HOME || process.cwd(), '.cloudcli'), 'builder.json');
++const MAX_PARALLEL_WORKERS_LIMIT = 4;
++const DEFAULT_PARALLEL_WORKERS = 2;
++const RISKY_CHANGE_PATTERN = /\b(db|database|schema|migration|migrations|secret|secrets|env|environment variable|credential|credentials|token|api key)\b/i;
++
++const PROVIDER_RUNNERS = {
++  claude: queryClaudeSDK,
++  cursor: spawnCursor,
++  codex: queryCodex,
++  gemini: spawnGemini,
++};
++
++const builderApprovalRequests = new Map();
++
++const sendNormalized = (writer, fields) => {
++  writer.send(createNormalizedMessage(fields));
++};
++
++const sendAssistantText = (writer, sessionId, provider, content) => {
++  sendNormalized(writer, {
++    kind: 'text',
++    role: 'assistant',
++    content,
++    sessionId,
++    provider,
++  });
++};
++
++const sendTaskUpdate = (writer, sessionId, provider, summary, status = 'completed') => {
++  sendNormalized(writer, {
++    kind: 'task_notification',
++    sessionId,
++    provider,
++    status,
++    summary,
++  });
++};
++
++const formatBulletList = (items) => items.map((item) => `- ${item}`).join('\n');
++
++const sanitizeFileName = (value) => value.replace(/[^a-zA-Z0-9._-]/g, '-');
++
++const truncateOutput = (text, maxChars = 5000) => {
++  if (!text) return '';
++  return text.length > maxChars ? `${text.slice(0, maxChars)}\n... [truncated]` : text;
++};
++
++export function resolveBuilderApproval(requestId, decision = {}) {
++  const pending = builderApprovalRequests.get(requestId);
++  if (!pending) {
++    return false;
++  }
++
++  builderApprovalRequests.delete(requestId);
++  pending.resolve({
++    allow: Boolean(decision.allow),
++    message: typeof decision.message === 'string' ? decision.message.trim() : '',
++  });
++  return true;
++}
++
++const waitForBuilderApproval = ({ writer, sessionId, provider, summary, input, context }) => new Promise((resolve) => {
++  const requestId = `builder_approval_${randomUUID()}`;
++  builderApprovalRequests.set(requestId, { resolve });
++  sendNormalized(writer, {
++    kind: 'permission_request',
++    sessionId,
++    provider,
++    requestId,
++    toolName: 'BuilderApproval',
++    source: 'builder',
++    input,
++    context: {
++      summary,
++      ...(context || {}),
++    },
++  });
++});
++
++const maybeApproveStage = async ({
++  enabled,
++  writer,
++  sessionId,
++  provider,
++  summary,
++  input,
++  context,
++}) => {
++  if (!enabled) {
++    return { allow: true, message: '' };
++  }
++
++  return waitForBuilderApproval({
++    writer,
++    sessionId,
++    provider,
++    summary,
++    input,
++    context,
++  });
++};
++
++const readJsonFile = async (filePath) => {
++  try {
++    const raw = await fs.readFile(filePath, 'utf8');
++    const parsed = JSON.parse(raw);
++    return parsed && typeof parsed === 'object' ? parsed : {};
++  } catch {
++    return {};
++  }
++};
++
++const detectProjectScripts = async (projectPath) => {
++  try {
++    const raw = await fs.readFile(path.join(projectPath, 'package.json'), 'utf8');
++    const parsed = JSON.parse(raw);
++    return {
++      scripts: parsed?.scripts && typeof parsed.scripts === 'object' ? parsed.scripts : {},
++      packageConfig: parsed?.cloudcli?.builder && typeof parsed.cloudcli.builder === 'object'
++        ? parsed.cloudcli.builder
++        : {},
++    };
++  } catch {
++    return { scripts: {}, packageConfig: {} };
++  }
++};
++
++const mergeBuilderConfig = (...configs) => configs.reduce((acc, item) => {
++  if (!item || typeof item !== 'object') {
++    return acc;
++  }
++
++  return {
++    ...acc,
++    ...item,
++    orchestration: { ...(acc.orchestration || {}), ...(item.orchestration || {}) },
++    approvals: { ...(acc.approvals || {}), ...(item.approvals || {}) },
++    merge: { ...(acc.merge || {}), ...(item.merge || {}) },
++    production: { ...(acc.production || {}), ...(item.production || {}) },
++  };
++}, {});
++
++const withDefaultBuilderConfig = (config = {}) => ({
++  orchestration: {
++    maxParallelWorkers: DEFAULT_PARALLEL_WORKERS,
++    maxWorkers: 6,
++    workerModel: null,
++    integratorModel: null,
++    ...(config.orchestration || {}),
++  },
++  approvals: {
++    riskyChanges: true,
++    merge: true,
++    production: true,
++    ...(config.approvals || {}),
++  },
++  merge: {
++    command: null,
++    branch: 'main',
++    ...(config.merge || {}),
++  },
++  production: {
++    command: null,
++    ...(config.production || {}),
++  },
++});
++
++const clampParallelWorkers = (value) => {
++  const numeric = Number(value);
++  if (!Number.isFinite(numeric) || numeric < 1) {
++    return DEFAULT_PARALLEL_WORKERS;
++  }
++
++  return Math.min(MAX_PARALLEL_WORKERS_LIMIT, Math.floor(numeric));
++};
++
++const guessLanguages = (input) => {
++  const normalized = input.toLowerCase();
++  const languages = [];
++
++  if (/\bmultilingual\b|\bi18n\b|\btranslations?\b|\blocali[sz]ation\b/.test(normalized)) {
++    languages.push('Primary site language', 'English');
++  }
++  if (/\bspanish\b/.test(normalized)) languages.push('Spanish');
++  if (/\brussian\b/.test(normalized)) languages.push('Russian');
++  if (/\bgerman\b/.test(normalized)) languages.push('German');
++  if (/\bfrench\b/.test(normalized)) languages.push('French');
++
++  return languages.length > 0 ? [...new Set(languages)] : ['Primary site language'];
++};
++
++const guessPages = (input) => {
++  const normalized = input.toLowerCase();
++  const pages = [];
++
++  if (/\bhome(page)?\b/.test(normalized)) pages.push('Homepage entry point');
++  if (/\bpricing\b/.test(normalized)) pages.push('Pricing page or pricing section');
++  if (/\bcalculator\b/.test(normalized)) pages.push('Existing calculator modal/page');
++  if (/\bcontact\b|\bform\b|\bsubmit\b/.test(normalized)) pages.push('Lead/contact submission flow');
++  if (/\blanguage\b|\blocali[sz]ation\b|\btranslations?\b/.test(normalized)) pages.push('Translation resources');
++
++  return pages.length > 0 ? pages : ['Relevant feature entry points'];
++};
++
++const buildFeatureTasks = (input, languages, pages) => {
++  const normalized = input.toLowerCase();
++  const tasks = [];
++
++  if (pages.some((entry) => /home|entry point/i.test(entry))) {
++    tasks.push('Entry-point wiring and navigation');
++  }
++  if (/\bpricing\b|\bcalculator\b|\bquote\b/.test(normalized)) {
++    tasks.push('Pricing logic and state flow');
++  }
++  if (/\bui\b|\bdesign\b|\bcomponent\b|\bmodal\b|\bpage\b|\bform\b/.test(normalized) || tasks.length === 0) {
++    tasks.push('UI surface and user interactions');
++  }
++  if (languages.length > 1 || /\btranslations?\b|\blocali[sz]ation\b|\blanguage\b/.test(normalized)) {
++    tasks.push('Localization and translated content');
++  }
++  if (/\bsubmit\b|\bcontact\b|\bemail\b|\blead\b|\brequest\b/.test(normalized)) {
++    tasks.push('Submission flow and downstream handling');
++  }
++  if (!tasks.includes('Shared integration and final glue')) {
++    tasks.push('Shared integration and final glue');
++  }
++
++  return [...new Set(tasks)].map((title, index) => ({
++    id: index + 1,
++    title,
++    status: 'pending',
++    priority: 'high',
++    details: '',
++  }));
++};
++
++const buildPrdMarkdown = ({ command, projectPath, languages, pages, tasks, maxParallelWorkers }) => [
++  '## Builder PRD',
++  '',
++  `**Request**: ${command}`,
++  `**Project**: \`${projectPath || 'current workspace'}\``,
++  '',
++  '### Languages',
++  formatBulletList(languages),
++  '',
++  '### Pages Affected',
++  formatBulletList(pages),
++  '',
++  '### Delivery Shape',
++  formatBulletList([
++    'Complex work is split by feature area rather than executed serially step by step',
++    'Each worker gets the full PRD and full project context, but owns one primary slice',
++    `The worker pool runs with at most ${maxParallelWorkers} parallel agent sessions`,
++    'A final integrator pass reconciles shared files and stitches the result together',
++  ]),
++  '',
++  '## Worker Tasks',
++  formatBulletList(tasks.map((task) => `Task ${task.id}: ${task.title}`)),
++].join('\n');
++
++const ensureDirectories = async (projectPath) => {
++  await fs.mkdir(path.join(projectPath, TASKMASTER_DIR, 'docs'), { recursive: true });
++  await fs.mkdir(path.join(projectPath, TASKMASTER_DIR, 'tasks'), { recursive: true });
++  await fs.mkdir(path.join(projectPath, BUILDER_ARTIFACT_DIR), { recursive: true });
++};
++
++const persistRunArtifacts = async (projectPath, sessionId, prdMarkdown, tasks, config) => {
++  await ensureDirectories(projectPath);
++
++  const prdPath = path.join(projectPath, TASKMASTER_DIR, 'docs', `cloudcli-builder-${sanitizeFileName(sessionId)}.md`);
++  const tasksPath = path.join(projectPath, TASKMASTER_DIR, 'tasks', 'tasks.json');
++  const runPath = path.join(projectPath, BUILDER_ARTIFACT_DIR, `${sanitizeFileName(sessionId)}.json`);
++  const latestPath = path.join(projectPath, BUILDER_ARTIFACT_DIR, 'latest-run.json');
++  const configExamplePath = path.join(projectPath, '.cloudcli', 'builder.example.json');
++  const configTemplate = {
++    orchestration: {
++      maxParallelWorkers: 2,
++      maxWorkers: 6,
++      workerModel: 'gpt-5.4-mini',
++      integratorModel: 'gpt-5.5',
++    },
++    approvals: {
++      riskyChanges: true,
++      merge: true,
++      production: true,
++    },
++    merge: {
++      command: 'git push origin HEAD:main',
++      branch: 'main',
++    },
++    production: {
++      command: 'npm run deploy:production',
++    },
++  };
++
++  await fs.mkdir(path.dirname(configExamplePath), { recursive: true });
++  await fs.writeFile(prdPath, `${prdMarkdown}\n`, 'utf8');
++  await fs.writeFile(tasksPath, `${JSON.stringify({ tasks }, null, 2)}\n`, 'utf8');
++  await fs.writeFile(runPath, `${JSON.stringify({ sessionId, prdPath, tasksPath, config }, null, 2)}\n`, 'utf8');
++  await fs.writeFile(latestPath, `${JSON.stringify({ sessionId, prdPath, tasksPath, config }, null, 2)}\n`, 'utf8');
++
++  try {
++    await fs.access(configExamplePath);
++  } catch {
++    await fs.writeFile(configExamplePath, `${JSON.stringify(configTemplate, null, 2)}\n`, 'utf8');
++  }
++
++  return { prdPath, tasksPath };
++};
++
++class BufferedWriter {
++  constructor(sessionId, provider) {
++    this.sessionId = sessionId;
++    this.provider = provider;
++    this.sessionHistory = [];
++    this.textChunks = [];
++    this.errors = [];
++  }
++
++  send(message) {
++    this.sessionHistory.push(message);
++    if (message?.newSessionId) {
++      this.sessionId = message.newSessionId;
++    } else if (message?.sessionId) {
++      this.sessionId = message.sessionId;
++    }
++
++    if (typeof message?.content === 'string' && (message.kind === 'text' || message.kind === 'stream_delta')) {
++      this.textChunks.push(message.content);
++    }
++    if (typeof message?.summary === 'string') {
++      this.textChunks.push(message.summary);
++    }
++    if (typeof message?.content === 'string' && message.kind === 'error') {
++      this.errors.push(message.content);
++    }
++  }
++
++  setSessionId(sessionId) {
++    this.sessionId = sessionId;
++  }
++
++  getSessionId() {
++    return this.sessionId;
++  }
++
++  getSummary() {
++    const text = truncateOutput(this.textChunks.join('\n').trim(), 1800);
++    return {
++      sessionId: this.sessionId,
++      provider: this.provider,
++      text: text || '',
++      errors: [...this.errors],
++    };
++  }
++}
++
++const runProviderTask = async ({ runner, prompt, options, writer }) => {
++  await runner(prompt, {
++    ...options,
++    workflowMode: 'chat',
++  }, writer);
++};
++
++const runItemsWithConcurrency = async (items, limit, worker) => {
++  const results = new Array(items.length);
++  let currentIndex = 0;
++
++  const executeNext = async () => {
++    const index = currentIndex;
++    currentIndex += 1;
++    if (index >= items.length) {
++      return;
++    }
++
++    results[index] = await worker(items[index], index);
++    await executeNext();
++  };
++
++  const count = Math.min(limit, items.length);
++  await Promise.all(Array.from({ length: count }, () => executeNext()));
++  return results;
++};
++
++const formatWorkerResults = (results) => results.map((result) => [
++  `### Worker ${result.task.id}: ${result.task.title}`,
++  `Status: ${result.ok ? 'completed' : 'failed'}`,
++  result.summary ? result.summary : 'No worker summary captured.',
++  result.errors.length > 0 ? `Errors: ${result.errors.join(' | ')}` : '',
++].filter(Boolean).join('\n')).join('\n\n');
++
++export async function runBuilderWorkflow(command, options = {}, writer, provider = 'claude') {
++  const sessionId = `builder-${randomUUID()}`;
++  const projectPath = options.projectPath || options.cwd || process.cwd();
++  const runner = PROVIDER_RUNNERS[provider] || queryClaudeSDK;
++
++  sendNormalized(writer, {
++    kind: 'session_created',
++    newSessionId: sessionId,
++    sessionId,
++    provider,
++  });
++
++  sendTaskUpdate(writer, sessionId, provider, 'Builder workflow started', 'in_progress');
++
++  try {
++    const globalConfig = await readJsonFile(GLOBAL_BUILDER_CONFIG_PATH);
++    const { packageConfig } = await detectProjectScripts(projectPath);
++    const projectConfig = await readJsonFile(path.join(projectPath, '.cloudcli', 'builder.json'));
++    const builderConfig = withDefaultBuilderConfig(mergeBuilderConfig(globalConfig, packageConfig, projectConfig));
++
++    const languages = guessLanguages(command);
++    const pages = guessPages(command);
++    const allTasks = buildFeatureTasks(command, languages, pages);
++    const maxWorkers = Math.max(1, Math.floor(Number(builderConfig.orchestration.maxWorkers) || allTasks.length));
++    const workerTasks = allTasks.slice(0, maxWorkers);
++    const parallelWorkers = clampParallelWorkers(builderConfig.orchestration.maxParallelWorkers);
++    const prdMarkdown = buildPrdMarkdown({
++      command,
++      projectPath,
++      languages,
++      pages,
++      tasks: workerTasks,
++      maxParallelWorkers: parallelWorkers,
++    });
++
++    const { prdPath, tasksPath } = await persistRunArtifacts(projectPath, sessionId, prdMarkdown, workerTasks, builderConfig);
++
++    sendAssistantText(writer, sessionId, provider, [
++      prdMarkdown,
++      '',
++      `Artifacts: \`${prdPath}\`, \`${tasksPath}\``,
++      '',
++      `Parallel worker limit: ${parallelWorkers}`,
++      builderConfig.orchestration.workerModel ? `Worker model override: \`${builderConfig.orchestration.workerModel}\`` : '',
++      builderConfig.orchestration.integratorModel ? `Integrator model override: \`${builderConfig.orchestration.integratorModel}\`` : '',
++    ].filter(Boolean).join('\n'));
++
++    if (builderConfig.approvals.riskyChanges && RISKY_CHANGE_PATTERN.test(command)) {
++      const approval = await maybeApproveStage({
++        enabled: true,
++        writer,
++        sessionId,
++        provider,
++        summary: 'Builder workflow detected a risky scope',
++        input: command,
++        context: {
++          reason: 'The request appears to involve database, schema, secret, or environment changes.',
++        },
++      });
++
++      if (!approval.allow) {
++        sendAssistantText(writer, sessionId, provider, `Builder workflow stopped before worker execution.\n\nReason: ${approval.message || 'Risky scope was not approved.'}`);
++        sendNormalized(writer, { kind: 'complete', sessionId, provider, success: false, exitCode: 1 });
++        return;
++      }
++    }
++
++    sendTaskUpdate(writer, sessionId, provider, `Dispatching ${workerTasks.length} worker task(s) with concurrency ${parallelWorkers}`, 'in_progress');
++
++    const workerResults = await runItemsWithConcurrency(workerTasks, parallelWorkers, async (task, index) => {
++      const workerLabel = `Worker ${task.id}`;
++      sendTaskUpdate(writer, sessionId, provider, `${workerLabel} started: ${task.title}`, 'in_progress');
++
++      const workerWriter = new BufferedWriter(`${sessionId}-worker-${task.id}`, provider);
++      const prompt = [
++        `You are ${workerLabel} in a coordinated builder run.`,
++        `Project root: ${projectPath}`,
++        '',
++        'Global request:',
++        command,
++        '',
++        'Full PRD:',
++        prdMarkdown,
++        '',
++        `Your owned slice: ${task.title}`,
++        '',
++        'Rules:',
++        '- You know the whole project context, but you own this slice.',
++        '- Other workers may edit the repository in parallel. Do not revert unrelated changes.',
++        '- Keep changes tightly scoped to your slice and shared touch points that are strictly necessary.',
++        '- Make code changes directly in the project.',
++        '- Avoid broad formatting-only edits.',
++        '- Leave integration cleanup for the final integrator unless it blocks your slice.',
++      ].join('\n');
++
++      try {
++        await runProviderTask({
++          runner,
++          prompt,
++          options: {
++            ...options,
++            cwd: projectPath,
++            projectPath,
++            model: builderConfig.orchestration.workerModel || options.model,
++          },
++          writer: workerWriter,
++        });
++
++        const result = workerWriter.getSummary();
++        sendTaskUpdate(writer, sessionId, provider, `${workerLabel} completed: ${task.title}`, 'completed');
++        if (result.text) {
++          sendAssistantText(writer, sessionId, provider, `### ${workerLabel} summary\n${result.text}`);
++        }
++
++        return {
++          ok: true,
++          task,
++          summary: result.text,
++          errors: result.errors,
++          childSessionId: result.sessionId || `${sessionId}-worker-${index + 1}`,
++        };
++      } catch (error) {
++        const message = error instanceof Error ? error.message : String(error);
++        sendAssistantText(writer, sessionId, provider, `### ${workerLabel} failed\n${message}`);
++        return {
++          ok: false,
++          task,
++          summary: '',
++          errors: [message],
++          childSessionId: `${sessionId}-worker-${index + 1}`,
++        };
++      }
++    });
++
++    const failedWorkers = workerResults.filter((result) => !result.ok);
++    if (failedWorkers.length > 0) {
++      sendAssistantText(writer, sessionId, provider, [
++        'Some workers failed before integration.',
++        '',
++        formatWorkerResults(workerResults),
++      ].join('\n'));
++      sendNormalized(writer, { kind: 'complete', sessionId, provider, success: false, exitCode: 1 });
++      return;
++    }
++
++    sendTaskUpdate(writer, sessionId, provider, 'Starting final integration pass', 'in_progress');
++
++    await runProviderTask({
++      runner,
++      prompt: [
++        'You are the final integrator for a coordinated builder run.',
++        `Project root: ${projectPath}`,
++        '',
++        'Original request:',
++        command,
++        '',
++        'Full PRD:',
++        prdMarkdown,
++        '',
++        'Worker results:',
++        formatWorkerResults(workerResults),
++        '',
++        'Requirements:',
++        '- Review the repository after all worker changes.',
++        '- Reconcile shared files and resolve inconsistencies between slices.',
++        '- Finish missing glue code, naming alignment, and shared state integration.',
++        '- Do not redo the whole feature from scratch. Integrate what exists.',
++      ].join('\n'),
++      options: {
++        ...options,
++        cwd: projectPath,
++        projectPath,
++        model: builderConfig.orchestration.integratorModel || options.model,
++      },
++      writer,
++    });
++
++    if (builderConfig.merge.command) {
++      const mergeApproval = await maybeApproveStage({
++        enabled: Boolean(builderConfig.approvals.merge),
++        writer,
++        sessionId,
++        provider,
++        summary: 'Builder workflow is ready to push or merge the result',
++        input: builderConfig.merge.command,
++        context: {
++          branch: builderConfig.merge.branch || 'main',
++        },
++      });
++
++      if (mergeApproval.allow) {
++        const { execFile } = await import('node:child_process');
++        await new Promise((resolve) => {
++          execFile('sh', ['-lc', builderConfig.merge.command], { cwd: projectPath }, () => resolve());
++        });
++      }
++    }
++
++    if (builderConfig.production.command) {
++      const productionApproval = await maybeApproveStage({
++        enabled: Boolean(builderConfig.approvals.production),
++        writer,
++        sessionId,
++        provider,
++        summary: 'Builder workflow is ready for production deployment',
++        input: builderConfig.production.command,
++      });
++
++      if (productionApproval.allow) {
++        const { execFile } = await import('node:child_process');
++        await new Promise((resolve) => {
++          execFile('sh', ['-lc', builderConfig.production.command], { cwd: projectPath }, () => resolve());
++        });
++      }
++    }
++
++    sendTaskUpdate(writer, sessionId, provider, 'Builder workflow completed', 'completed');
++    sendNormalized(writer, { kind: 'complete', sessionId, provider, success: true, exitCode: 0 });
++  } catch (error) {
++    const message = error instanceof Error ? error.message : String(error);
++    sendAssistantText(writer, sessionId, provider, `Builder workflow failed.\n\n\`\`\`text\n${message}\n\`\`\``);
++    sendNormalized(writer, { kind: 'error', sessionId, provider, content: message });
++  }
++}

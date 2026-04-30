@@ -1,0 +1,11 @@
+diff --git a/server/builder-mode.js b/server/builder-mode.js
+--- a/server/builder-mode.js
++++ b/server/builder-mode.js
+@@ -592,6 +592,7 @@
+   await runner(prompt, {
+     ...options,
+     workflowMode: 'chat',
++    permissionMode: options.permissionMode || 'bypassPermissions',
+   }, writer);
+ };
+

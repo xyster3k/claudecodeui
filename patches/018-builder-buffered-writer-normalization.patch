@@ -1,0 +1,57 @@
+diff --git a/server/builder-mode.js b/server/builder-mode.js
+--- a/server/builder-mode.js
++++ b/server/builder-mode.js
+@@ -540,27 +540,40 @@
+     this.textChunks = [];
+     this.errors = [];
+     this.onSessionId = onSessionId;
++    this.isWebSocketWriter = true;
+   }
+ 
+   send(message) {
+-    this.sessionHistory.push(message);
+-    if (message?.newSessionId) {
+-      this.sessionId = message.newSessionId;
+-      this.onSessionId?.(this.sessionId, message?.provider || this.provider);
+-    } else if (message?.sessionId) {
+-      this.sessionId = message.sessionId;
+-      this.onSessionId?.(this.sessionId, message?.provider || this.provider);
++    let normalizedMessage = message;
++    if (typeof normalizedMessage === 'string') {
++      try {
++        normalizedMessage = JSON.parse(normalizedMessage);
++      } catch {
++        normalizedMessage = {
++          kind: 'text',
++          content: normalizedMessage,
++        };
++      }
+     }
+ 
+-    if (typeof message?.content === 'string' && (message.kind === 'text' || message.kind === 'stream_delta')) {
+-      this.textChunks.push(message.content);
++    this.sessionHistory.push(normalizedMessage);
++    if (normalizedMessage?.newSessionId) {
++      this.sessionId = normalizedMessage.newSessionId;
++      this.onSessionId?.(this.sessionId, normalizedMessage?.provider || this.provider);
++    } else if (normalizedMessage?.sessionId) {
++      this.sessionId = normalizedMessage.sessionId;
++      this.onSessionId?.(this.sessionId, normalizedMessage?.provider || this.provider);
+     }
+-    if (typeof message?.summary === 'string') {
+-      this.textChunks.push(message.summary);
++
++    if (typeof normalizedMessage?.content === 'string' && (normalizedMessage.kind === 'text' || normalizedMessage.kind === 'stream_delta')) {
++      this.textChunks.push(normalizedMessage.content);
+     }
+-    if (typeof message?.content === 'string' && message.kind === 'error') {
+-      this.errors.push(message.content);
++    if (typeof normalizedMessage?.summary === 'string') {
++      this.textChunks.push(normalizedMessage.summary);
+     }
++    if (typeof normalizedMessage?.content === 'string' && normalizedMessage.kind === 'error') {
++      this.errors.push(normalizedMessage.content);
++    }
+   }
+ 
+   setSessionId(sessionId) {

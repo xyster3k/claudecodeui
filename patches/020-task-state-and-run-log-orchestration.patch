@@ -1,0 +1,1157 @@
+diff --git a/server/builder-mode.js b/server/builder-mode.js
+index 74cfe5d..a6bd14e 100644
+--- a/server/builder-mode.js
++++ b/server/builder-mode.js
+@@ -54,6 +54,42 @@ const PROVIDER_ABORTERS = {
+ const builderApprovalRequests = new Map();
+ const activeBuilderRuns = new Map();
+ const plannerControlSessions = new Map();
++const BUILDER_TASK_STATUSES = {
++  pending: 'pending',
++  inProgress: 'in_progress',
++  reviewPending: 'review_pending',
++  reworkRequested: 'rework_requested',
++  reviewerRequested: 'reviewer_requested',
++  accepted: 'accepted',
++  failed: 'failed',
++  blocked: 'blocked',
++};
++const BUILDER_REVIEW_STATUSES = {
++  pending: 'pending',
++  inProgress: 'in_progress',
++  changesRequested: 'changes_requested',
++  accepted: 'accepted',
++  failed: 'failed',
++};
++const BUILDER_RUN_PHASES = {
++  initializing: 'initializing',
++  planning: 'planning',
++  approvals: 'approvals',
++  workerExecution: 'worker_execution',
++  integration: 'integration',
++  qa: 'qa',
++  merge: 'merge',
++  production: 'production',
++  completed: 'completed',
++  failed: 'failed',
++  aborted: 'aborted',
++};
++const BUILDER_STOP_REASONS = {
++  completed: 'completed',
++  failed: 'failed',
++  aborted: 'aborted',
++  approvalDenied: 'approval_denied',
++};
+ 
+ const sendNormalized = (writer, fields) => {
+   writer.send(createNormalizedMessage(fields));
+@@ -124,6 +160,60 @@ const readStringArray = (value) => {
+     .filter(Boolean);
+ };
+ 
++const readIntegerArray = (value) => {
++  if (!Array.isArray(value)) {
++    return [];
++  }
++
++  return [...new Set(value
++    .map((entry) => Number(entry))
++    .filter((entry) => Number.isFinite(entry) && entry > 0)
++    .map((entry) => Math.floor(entry)))];
++};
++
++const summarizeBuilderTaskMetrics = (tasks) => {
++  const counts = {
++    total: Array.isArray(tasks) ? tasks.length : 0,
++    pending: 0,
++    in_progress: 0,
++    review_pending: 0,
++    rework_requested: 0,
++    reviewer_requested: 0,
++    accepted: 0,
++    failed: 0,
++    blocked: 0,
++  };
++
++  (tasks || []).forEach((task) => {
++    const status = readString(task?.status) || BUILDER_TASK_STATUSES.pending;
++    if (!Object.prototype.hasOwnProperty.call(counts, status)) {
++      return;
++    }
++    counts[status] += 1;
++  });
++
++  return counts;
++};
++
++const createBuilderTaskRuntimeState = (task) => ({
++  ...task,
++  status: readString(task?.status) || BUILDER_TASK_STATUSES.pending,
++  reviewStatus: readString(task?.reviewStatus) || BUILDER_REVIEW_STATUSES.pending,
++  dependsOn: readIntegerArray(task?.dependsOn),
++  fileGroups: readStringArray(task?.fileGroups),
++  attempts: Math.max(0, Math.floor(Number(task?.attempts) || 0)),
++  reviewerPasses: Math.max(0, Math.floor(Number(task?.reviewerPasses) || 0)),
++  acceptedByPlanner: Boolean(task?.acceptedByPlanner),
++  assignedProvider: readString(task?.assignedProvider) || '',
++  assignedSessionId: readString(task?.assignedSessionId) || '',
++  lastSummary: readString(task?.lastSummary) || '',
++  lastError: readString(task?.lastError) || '',
++  touchedFiles: readStringArray(task?.touchedFiles),
++  artifacts: Array.isArray(task?.artifacts) ? task.artifacts.filter(Boolean) : [],
++  reviewTrail: Array.isArray(task?.reviewTrail) ? task.reviewTrail.filter(Boolean) : [],
++  updatedAt: readString(task?.updatedAt) || new Date().toISOString(),
++});
++
+ const defaultPlannerModelForProvider = (provider, fallback) => {
+   if (provider === 'codex') {
+     return 'gpt-5.5';
+@@ -251,6 +341,15 @@ export async function abortBuilderWorkflow(sessionId) {
+   }
+ 
+   run.aborted = true;
++  if (run.record) {
++    await appendBuilderRunEvent(run, {
++      kind: 'workflow_abort_requested',
++      summary: 'Builder workflow abort requested',
++    });
++    await setBuilderRunOutcome(run, 'aborted', BUILDER_STOP_REASONS.aborted, {
++      lastEvent: 'Builder workflow abort requested',
++    });
++  }
+   const childSessions = [...run.childSessions.entries()].filter(([childSessionId]) => Boolean(childSessionId));
+   const results = await Promise.all(childSessions.map(async ([childSessionId, metadata]) => {
+     try {
+@@ -454,6 +553,11 @@ const ensureDirectories = async (projectPath) => {
+   await fs.mkdir(path.join(projectPath, TASKMASTER_DIR, 'docs'), { recursive: true });
+   await fs.mkdir(path.join(projectPath, TASKMASTER_DIR, 'tasks'), { recursive: true });
+   await fs.mkdir(path.join(projectPath, BUILDER_ARTIFACT_DIR), { recursive: true });
++  await fs.mkdir(path.join(projectPath, BUILDER_ARTIFACT_DIR, 'logs'), { recursive: true });
++};
++
++const writeJsonFile = async (filePath, value) => {
++  await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+ };
+ 
+ const persistRunArtifacts = async (projectPath, sessionId, prdMarkdown, tasks, config) => {
+@@ -463,6 +567,7 @@ const persistRunArtifacts = async (projectPath, sessionId, prdMarkdown, tasks, c
+   const tasksPath = path.join(projectPath, TASKMASTER_DIR, 'tasks', 'tasks.json');
+   const runPath = path.join(projectPath, BUILDER_ARTIFACT_DIR, `${sanitizeFileName(sessionId)}.json`);
+   const latestPath = path.join(projectPath, BUILDER_ARTIFACT_DIR, 'latest-run.json');
++  const logPath = path.join(projectPath, BUILDER_ARTIFACT_DIR, 'logs', `${sanitizeFileName(sessionId)}.ndjson`);
+   const configExamplePath = path.join(projectPath, '.cloudcli', 'builder.example.json');
+   const configTemplate = {
+     orchestration: {
+@@ -506,9 +611,14 @@ const persistRunArtifacts = async (projectPath, sessionId, prdMarkdown, tasks, c
+ 
+   await fs.mkdir(path.dirname(configExamplePath), { recursive: true });
+   await fs.writeFile(prdPath, `${prdMarkdown}\n`, 'utf8');
+-  await fs.writeFile(tasksPath, `${JSON.stringify({ tasks }, null, 2)}\n`, 'utf8');
+-  await fs.writeFile(runPath, `${JSON.stringify({ sessionId, prdPath, tasksPath, config }, null, 2)}\n`, 'utf8');
+-  await fs.writeFile(latestPath, `${JSON.stringify({ sessionId, prdPath, tasksPath, config }, null, 2)}\n`, 'utf8');
++  await writeJsonFile(tasksPath, { tasks });
++  await writeJsonFile(runPath, { sessionId, prdPath, tasksPath, logPath, config });
++  await writeJsonFile(latestPath, { sessionId, prdPath, tasksPath, logPath, config });
++  try {
++    await fs.access(logPath);
++  } catch {
++    await fs.writeFile(logPath, '', 'utf8');
++  }
+ 
+   try {
+     await fs.access(configExamplePath);
+@@ -516,7 +626,179 @@ const persistRunArtifacts = async (projectPath, sessionId, prdMarkdown, tasks, c
+     await fs.writeFile(configExamplePath, `${JSON.stringify(configTemplate, null, 2)}\n`, 'utf8');
+   }
+ 
+-  return { prdPath, tasksPath };
++  return {
++    prdPath,
++    tasksPath,
++    runPath,
++    latestPath,
++    logPath,
++  };
++};
++
++const createBuilderRunRecord = ({
++  sessionId,
++  provider,
++  command,
++  projectPath,
++  config,
++}) => {
++  const timestamp = new Date().toISOString();
++  return {
++    sessionId,
++    provider,
++    command,
++    projectPath,
++    status: 'running',
++    phase: BUILDER_RUN_PHASES.initializing,
++    stopReason: null,
++    createdAt: timestamp,
++    updatedAt: timestamp,
++    config: config || {},
++    prdPath: '',
++    tasksPath: '',
++    logPath: '',
++    plannerSessionId: '',
++    projectStateSummary: '',
++    childSessions: [],
++    tasks: [],
++    metrics: summarizeBuilderTaskMetrics([]),
++    lastEvent: '',
++    errorMessage: '',
++  };
++};
++
++const serializeChildSessions = (runState) => [...runState.childSessions.entries()].map(([childSessionId, metadata]) => ({
++  sessionId: childSessionId,
++  provider: metadata?.provider || runState.provider,
++  role: metadata?.role || 'worker',
++}));
++
++const persistBuilderRunState = async (runState, { syncTasks = true } = {}) => {
++  if (!runState?.record || !runState?.paths) {
++    return;
++  }
++
++  await runState.persistenceQueue(async () => {
++    runState.record.updatedAt = new Date().toISOString();
++    runState.record.childSessions = serializeChildSessions(runState);
++    runState.record.metrics = summarizeBuilderTaskMetrics(runState.record.tasks);
++    await writeJsonFile(runState.paths.runPath, runState.record);
++    await writeJsonFile(runState.paths.latestPath, runState.record);
++    if (syncTasks && runState.record.tasksPath) {
++      await writeJsonFile(runState.record.tasksPath, { tasks: runState.record.tasks });
++    }
++  });
++};
++
++const appendBuilderRunEvent = async (runState, event) => {
++  if (!runState?.paths?.logPath) {
++    return;
++  }
++
++  await runState.persistenceQueue(async () => {
++    const entry = {
++      ts: new Date().toISOString(),
++      sessionId: runState.sessionId,
++      provider: runState.provider,
++      phase: runState.record?.phase || BUILDER_RUN_PHASES.initializing,
++      status: runState.record?.status || 'running',
++      ...event,
++    };
++    await fs.appendFile(runState.paths.logPath, `${JSON.stringify(entry)}\n`, 'utf8');
++  });
++};
++
++const setBuilderRunPhase = async (runState, phase, fields = {}) => {
++  if (!runState?.record) {
++    return;
++  }
++
++  runState.record.phase = phase;
++  runState.record.lastEvent = readString(fields.lastEvent) || runState.record.lastEvent || '';
++  if (Object.prototype.hasOwnProperty.call(fields, 'errorMessage')) {
++    runState.record.errorMessage = readString(fields.errorMessage) || '';
++  }
++  if (Object.prototype.hasOwnProperty.call(fields, 'plannerSessionId')) {
++    runState.record.plannerSessionId = readString(fields.plannerSessionId) || '';
++  }
++  if (Object.prototype.hasOwnProperty.call(fields, 'projectStateSummary')) {
++    runState.record.projectStateSummary = readString(fields.projectStateSummary) || '';
++  }
++  await persistBuilderRunState(runState);
++};
++
++const setBuilderRunOutcome = async (runState, status, stopReason, fields = {}) => {
++  if (!runState?.record) {
++    return;
++  }
++
++  runState.record.status = status;
++  runState.record.stopReason = stopReason;
++  runState.record.phase = status === 'failed'
++    ? BUILDER_RUN_PHASES.failed
++    : status === 'aborted'
++      ? BUILDER_RUN_PHASES.aborted
++      : BUILDER_RUN_PHASES.completed;
++  runState.record.lastEvent = readString(fields.lastEvent) || runState.record.lastEvent || '';
++  runState.record.errorMessage = readString(fields.errorMessage) || '';
++  await persistBuilderRunState(runState);
++};
++
++const replaceBuilderTasks = async (runState, tasks, extraFields = {}) => {
++  if (!runState?.record) {
++    return;
++  }
++
++  runState.record.tasks = (tasks || []).map((task) => createBuilderTaskRuntimeState(task));
++  Object.assign(runState.record, extraFields);
++  await persistBuilderRunState(runState);
++};
++
++const updateBuilderTaskState = async (runState, taskId, patch) => {
++  if (!runState?.record?.tasks) {
++    return null;
++  }
++
++  const taskIndex = runState.record.tasks.findIndex((task) => Number(task.id) === Number(taskId));
++  if (taskIndex < 0) {
++    return null;
++  }
++
++  const current = runState.record.tasks[taskIndex];
++  const nextPatch = typeof patch === 'function' ? patch(current) : patch;
++  runState.record.tasks[taskIndex] = createBuilderTaskRuntimeState({
++    ...current,
++    ...(nextPatch || {}),
++    updatedAt: new Date().toISOString(),
++  });
++  await persistBuilderRunState(runState);
++  return runState.record.tasks[taskIndex];
++};
++
++const initializeBuilderRunPersistence = async ({
++  runState,
++  sessionId,
++  provider,
++  command,
++  projectPath,
++  config,
++}) => {
++  await ensureDirectories(projectPath);
++  runState.paths = {
++    runPath: path.join(projectPath, BUILDER_ARTIFACT_DIR, `${sanitizeFileName(sessionId)}.json`),
++    latestPath: path.join(projectPath, BUILDER_ARTIFACT_DIR, 'latest-run.json'),
++    logPath: path.join(projectPath, BUILDER_ARTIFACT_DIR, 'logs', `${sanitizeFileName(sessionId)}.ndjson`),
++  };
++  runState.record = createBuilderRunRecord({
++    sessionId,
++    provider,
++    command,
++    projectPath,
++    config,
++  });
++  runState.record.logPath = runState.paths.logPath;
++  await fs.writeFile(runState.paths.logPath, '', 'utf8');
++  await persistBuilderRunState(runState, { syncTasks: false });
+ };
+ 
+ class BufferedWriter {
+@@ -616,6 +898,66 @@ const runItemsWithConcurrency = async (items, limit, worker) => {
+   return results;
+ };
+ 
++const runTaskGraphWithConcurrency = async ({
++  tasks,
++  limit,
++  worker,
++  createBlockedResult,
++  onForcedScheduling,
++}) => {
++  const pending = tasks.map((task, index) => ({ task, index }));
++  const inFlight = new Map();
++  const results = new Map();
++
++  const dependencyStatesFor = (task) => (task.dependsOn || []).map((dependencyId) => results.get(dependencyId));
++  const isTaskReady = (task) => (task.dependsOn || []).every((dependencyId) => {
++    const dependencyResult = results.get(dependencyId);
++    return dependencyResult?.ok;
++  });
++
++  while (pending.length > 0 || inFlight.size > 0) {
++    while (inFlight.size < limit && pending.length > 0) {
++      let readyIndex = pending.findIndex(({ task }) => isTaskReady(task));
++      if (readyIndex === -1) {
++        const hasOnlyPendingDependencies = pending.findIndex(({ task }) => {
++          const dependencyStates = dependencyStatesFor(task);
++          return dependencyStates.length === 0 || dependencyStates.every((dependencyState) => !dependencyState);
++        });
++        if (hasOnlyPendingDependencies !== -1 && inFlight.size === 0) {
++          readyIndex = hasOnlyPendingDependencies;
++          await onForcedScheduling?.(pending[readyIndex].task);
++        }
++      }
++
++      if (readyIndex === -1) {
++        break;
++      }
++
++      const [{ task, index }] = pending.splice(readyIndex, 1);
++      const scheduled = Promise.resolve(worker(task, index)).then((result) => ({ id: task.id, result }));
++      inFlight.set(task.id, scheduled);
++    }
++
++    if (inFlight.size === 0) {
++      break;
++    }
++
++    const { id, result } = await Promise.race([...inFlight.values()]);
++    inFlight.delete(id);
++    results.set(id, result);
++  }
++
++  for (const { task, index } of pending) {
++    const blockedDependencies = (task.dependsOn || []).filter((dependencyId) => {
++      const dependencyResult = results.get(dependencyId);
++      return dependencyResult && !dependencyResult.ok;
++    });
++    results.set(task.id, await createBlockedResult(task, index, blockedDependencies));
++  }
++
++  return tasks.map((task) => results.get(task.id));
++};
++
+ const FILE_PATH_KEYS = new Set([
+   'file_path',
+   'filepath',
+@@ -819,6 +1161,8 @@ const summarizeTaskDefinition = (task) => [
+   task.details ? `Details: ${task.details}` : '',
+   task.ownership ? `Ownership: ${task.ownership}` : '',
+   task.priority ? `Priority: ${task.priority}` : '',
++  task.dependsOn?.length ? `Depends on: ${task.dependsOn.join(', ')}` : '',
++  task.fileGroups?.length ? `File groups: ${task.fileGroups.join(', ')}` : '',
+ ].filter(Boolean).join('\n');
+ 
+ const mergeTaskDefinition = (task, update) => {
+@@ -832,6 +1176,8 @@ const mergeTaskDefinition = (task, update) => {
+     details: readString(update.details) || task.details,
+     ownership: readString(update.ownership) || task.ownership,
+     priority: readString(update.priority) || task.priority,
++    depends_on_task_ids: update.depends_on_task_ids || update.dependsOn || task.dependsOn,
++    file_groups: update.file_groups || update.fileGroups || task.fileGroups,
+   }], 1)[0];
+ 
+   return normalized
+@@ -965,6 +1311,8 @@ const buildPlannerCheckpointPrompt = ({
+       details: 'string',
+       ownership: 'string',
+       priority: 'high',
++      depends_on_task_ids: [1],
++      file_groups: ['string'],
+     },
+   }, null, 2),
+   '```',
+@@ -1031,26 +1379,37 @@ const normalizePlannerTasks = (tasks, maxWorkers) => {
+           title: task.trim(),
+           details: '',
+           ownership: '',
+-          status: 'pending',
++          status: BUILDER_TASK_STATUSES.pending,
+           priority: 'high',
++          dependsOn: [],
++          fileGroups: [],
+         };
+       }
+ 
+       return {
+-        id: Number(task?.id) || index + 1,
++        id: index + 1,
+         title: readString(task?.title) || readString(task?.name) || `Task ${index + 1}`,
+         details: readString(task?.details) || readString(task?.description) || '',
+         ownership: readString(task?.ownership) || readString(task?.owner_scope) || '',
+-        status: 'pending',
++        status: BUILDER_TASK_STATUSES.pending,
+         priority: readString(task?.priority) || 'high',
++        dependsOn: readIntegerArray(task?.depends_on_task_ids || task?.dependsOn),
++        fileGroups: readStringArray(task?.file_groups || task?.fileGroups),
+       };
+     }).filter((task) => task.title)
+     : [];
+ 
+-  return normalized.slice(0, maxWorkers).map((task, index) => ({
++  const sliced = normalized.slice(0, maxWorkers).map((task, index) => ({
+     ...task,
+     id: index + 1,
+   }));
++
++  const availableIds = new Set(sliced.map((task) => task.id));
++
++  return sliced.map((task) => ({
++    ...task,
++    dependsOn: readIntegerArray(task.dependsOn).filter((dependencyId) => availableIds.has(dependencyId) && dependencyId !== task.id),
++  }));
+ };
+ 
+ const fallbackPlan = (command, projectPath, maxWorkers, parallelWorkers) => {
+@@ -1059,21 +1418,25 @@ const fallbackPlan = (command, projectPath, maxWorkers, parallelWorkers) => {
+       title: 'Repository inspection and architecture alignment',
+       details: 'Inspect the current project structure, identify the relevant implementation areas, and define concrete ownership boundaries for the remaining work.',
+       ownership: 'Read-heavy planning and shared architectural context.',
++      depends_on_task_ids: [],
+     },
+     {
+       title: 'Primary feature implementation',
+       details: `Implement the main feature requested by the user: ${command}`,
+       ownership: 'Core logic and primary product behavior.',
++      depends_on_task_ids: [1],
+     },
+     {
+       title: 'UI and workflow integration',
+       details: 'Integrate the feature into the existing UI, routes, state flow, and user interactions.',
+       ownership: 'Screens, interactions, and integration touch points.',
++      depends_on_task_ids: [1],
+     },
+     {
+       title: 'Final integration and consistency cleanup',
+       details: 'Resolve cross-cutting issues, align naming/data flow, and stitch shared files together.',
+       ownership: 'Shared glue and consistency.',
++      depends_on_task_ids: [2, 3],
+     },
+   ], maxWorkers);
+ 
+@@ -1112,6 +1475,7 @@ const buildPlannerPrompt = ({ command, projectPath, maxWorkers, parallelWorkers
+   '- Prefer meaningful slices such as ingestion pipeline, schema/data model, API layer, dossier UI, graph view, search subsystem, etc.',
+   '- Include a short project-state summary based on what you inspected.',
+   '- Mention the main touched areas or file groups when you can infer them.',
++  '- Use task dependencies when one slice clearly depends on another slice finishing first.',
+   '',
+   'User request:',
+   command,
+@@ -1128,6 +1492,8 @@ const buildPlannerPrompt = ({ command, projectPath, maxWorkers, parallelWorkers
+         details: 'string',
+         ownership: 'string',
+         priority: 'high',
++        depends_on_task_ids: [1],
++        file_groups: ['string'],
+       },
+     ],
+   }, null, 2),
+@@ -1177,9 +1543,13 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+   const sessionId = `builder-${randomUUID()}`;
+   const projectPath = options.projectPath || options.cwd || process.cwd();
+   const runState = {
++    sessionId,
+     provider,
+     aborted: false,
+     childSessions: new Map(),
++    persistenceQueue: createSerializedRunner(),
++    record: null,
++    paths: null,
+   };
+   activeBuilderRuns.set(sessionId, runState);
+ 
+@@ -1227,8 +1597,62 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+     const qaModel = builderConfig.qa.enabled && qaProvider
+       ? (builderConfig.qa.model || defaultQaModelForProvider(qaProvider, options.model))
+       : null;
++    const effectiveConfig = {
++      ...builderConfig,
++      orchestration: {
++        ...builderConfig.orchestration,
++        plannerModel,
++        workerModel,
++        integratorModel,
++      },
++      reasoning: {
++        planner: plannerReasoning,
++        worker: workerReasoning,
++        integrator: integratorReasoning,
++        qa: qaReasoning,
++      },
++      qa: {
++        ...builderConfig.qa,
++        provider: qaProvider,
++        model: qaModel,
++      },
++      supervision: {
++        ...builderConfig.supervision,
++        plannerCheckpointReview,
++        maxTaskPasses,
++        maxSliceReviewerPasses,
++      },
++    };
++
++    await initializeBuilderRunPersistence({
++      runState,
++      sessionId,
++      provider,
++      command,
++      projectPath,
++      config: effectiveConfig,
++    });
++    await setBuilderRunPhase(runState, BUILDER_RUN_PHASES.planning, { lastEvent: 'Builder workflow started' });
++    await appendBuilderRunEvent(runState, {
++      kind: 'workflow_started',
++      summary: 'Builder workflow started',
++    });
++
++    const reportStage = async (summary, status = 'completed', extra = {}) => {
++      sendTaskUpdate(writer, sessionId, provider, summary, status);
++      runState.record.lastEvent = summary;
++      await appendBuilderRunEvent(runState, {
++        kind: 'task_notification',
++        summary,
++        taskStatus: status,
++        ...extra,
++      });
++      await persistBuilderRunState(runState, { syncTasks: Boolean(runState.record?.tasksPath) });
++    };
+ 
+-    sendTaskUpdate(writer, sessionId, provider, 'Planner inspecting current project state', 'in_progress');
++    await reportStage('Planner inspecting current project state', 'in_progress', {
++      stage: BUILDER_RUN_PHASES.planning,
++    });
+ 
+     const registerChildSession = (childSessionId, childProvider = provider, role = 'worker') => {
+       if (childSessionId) {
+@@ -1240,6 +1664,13 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+         if (role === 'planner') {
+           plannerControlSessions.set(childSessionId, sessionId);
+         }
++        void appendBuilderRunEvent(runState, {
++          kind: 'child_session_registered',
++          role,
++          childSessionId,
++          childProvider: childProvider || provider,
++        });
++        void persistBuilderRunState(runState, { syncTasks: Boolean(runState.record?.tasksPath) });
+       }
+     };
+ 
+@@ -1264,7 +1695,12 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+     });
+ 
+     if (runState.aborted) {
+-      sendTaskUpdate(writer, sessionId, provider, 'Builder workflow aborted during planning', 'failed');
++      await reportStage('Builder workflow aborted during planning', 'failed', {
++        stage: BUILDER_RUN_PHASES.aborted,
++      });
++      await setBuilderRunOutcome(runState, 'aborted', BUILDER_STOP_REASONS.aborted, {
++        lastEvent: 'Builder workflow aborted during planning',
++      });
+       sendNormalized(writer, { kind: 'complete', sessionId, provider, success: false, aborted: true, exitCode: 1 });
+       return;
+     }
+@@ -1279,35 +1715,34 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+     let plannerSessionId = plannerWriter.getSessionId();
+     const workerTasks = plannerResult.tasks;
+     const prdMarkdown = plannerResult.prdMarkdown;
+-
+-    const effectiveConfig = {
+-      ...builderConfig,
+-      orchestration: {
+-        ...builderConfig.orchestration,
+-        plannerModel,
+-        workerModel,
+-        integratorModel,
+-      },
+-      reasoning: {
+-        planner: plannerReasoning,
+-        worker: workerReasoning,
+-        integrator: integratorReasoning,
+-        qa: qaReasoning,
+-      },
+-      qa: {
+-        ...builderConfig.qa,
+-        provider: qaProvider,
+-        model: qaModel,
+-      },
+-      supervision: {
+-        ...builderConfig.supervision,
+-        plannerCheckpointReview,
+-        maxTaskPasses,
+-        maxSliceReviewerPasses,
+-      },
+-    };
+-
+-    const { prdPath, tasksPath } = await persistRunArtifacts(projectPath, sessionId, prdMarkdown, workerTasks, effectiveConfig);
++    const {
++      prdPath,
++      tasksPath,
++      runPath,
++      latestPath,
++      logPath,
++    } = await persistRunArtifacts(projectPath, sessionId, prdMarkdown, workerTasks.map((task) => createBuilderTaskRuntimeState(task)), effectiveConfig);
++    runState.paths.runPath = runPath;
++    runState.paths.latestPath = latestPath;
++    runState.paths.logPath = logPath;
++    await replaceBuilderTasks(runState, workerTasks, {
++      prdPath,
++      tasksPath,
++      logPath,
++      plannerSessionId,
++      projectStateSummary: plannerResult.projectStateSummary,
++    });
++    await setBuilderRunPhase(runState, BUILDER_RUN_PHASES.planning, {
++      plannerSessionId,
++      projectStateSummary: plannerResult.projectStateSummary,
++      lastEvent: 'Planner completed and tasks were created',
++    });
++    await appendBuilderRunEvent(runState, {
++      kind: 'planner_completed',
++      summary: 'Planner completed and tasks were created',
++      plannerSessionId,
++      taskCount: workerTasks.length,
++    });
+ 
+     sendAssistantText(writer, sessionId, provider, [
+       prdMarkdown,
+@@ -1329,8 +1764,17 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+           ? 'QA stage: skipped because no alternate authenticated provider is currently available'
+           : null,
+     ].filter(Boolean).join('\n'));
++    await appendBuilderRunEvent(runState, {
++      kind: 'planner_prd_persisted',
++      summary: 'Planner PRD and task artifacts were persisted',
++      prdPath,
++      tasksPath,
++    });
+ 
+     if (builderConfig.approvals.riskyChanges && RISKY_CHANGE_PATTERN.test(command)) {
++      await setBuilderRunPhase(runState, BUILDER_RUN_PHASES.approvals, {
++        lastEvent: 'Waiting for risky scope approval',
++      });
+       const approval = await maybeApproveStage({
+         enabled: true,
+         writer,
+@@ -1345,9 +1789,23 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+ 
+       if (!approval.allow) {
+         sendAssistantText(writer, sessionId, provider, `Builder workflow stopped before worker execution.\n\nReason: ${approval.message || 'Risky scope was not approved.'}`);
++        await appendBuilderRunEvent(runState, {
++          kind: 'approval_denied',
++          summary: 'Risky scope approval denied',
++          message: approval.message || 'Risky scope was not approved.',
++        });
++        await setBuilderRunOutcome(runState, 'failed', BUILDER_STOP_REASONS.approvalDenied, {
++          lastEvent: 'Risky scope approval denied',
++          errorMessage: approval.message || 'Risky scope was not approved.',
++        });
+         sendNormalized(writer, { kind: 'complete', sessionId, provider, success: false, exitCode: 1 });
+         return;
+       }
++
++      await appendBuilderRunEvent(runState, {
++        kind: 'approval_granted',
++        summary: 'Risky scope approval granted',
++      });
+     }
+ 
+     const plannerCheckpointRunner = createSerializedRunner();
+@@ -1378,6 +1836,17 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       }
+ 
+       sendTaskUpdate(writer, sessionId, provider, `Planner reviewing checkpoint for Task ${task.id}: ${task.title}`, 'in_progress');
++      await updateBuilderTaskState(runState, task.id, {
++        status: BUILDER_TASK_STATUSES.reviewPending,
++        reviewStatus: BUILDER_REVIEW_STATUSES.inProgress,
++      });
++      await appendBuilderRunEvent(runState, {
++        kind: 'planner_checkpoint_started',
++        summary: `Planner reviewing checkpoint for Task ${task.id}: ${task.title}`,
++        taskId: task.id,
++        passNumber,
++        executorLabel,
++      });
+ 
+       const checkpointWriter = new BufferedWriter(plannerSessionId || `${sessionId}-planner`, provider, (childSessionId, childProvider) => {
+         registerChildSession(childSessionId, childProvider, 'planner');
+@@ -1429,6 +1898,15 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+         });
+       }
+ 
++      await appendBuilderRunEvent(runState, {
++        kind: 'planner_checkpoint_decision',
++        summary: `Planner decided ${decision.decision} for Task ${task.id}: ${task.title}`,
++        taskId: task.id,
++        passNumber,
++        decision: decision.decision,
++        reason: decision.reason,
++      });
++
+       return {
+         ...decision,
+         reviewText: checkpointSummary.text,
+@@ -1451,6 +1929,25 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       const actorRole = isReviewer ? 'slice reviewer' : 'worker';
+ 
+       sendTaskUpdate(writer, sessionId, provider, `${actorLabel} started: ${task.title}`, 'in_progress');
++      await updateBuilderTaskState(runState, task.id, (current) => ({
++        status: BUILDER_TASK_STATUSES.inProgress,
++        reviewStatus: current.reviewStatus === BUILDER_REVIEW_STATUSES.accepted
++          ? BUILDER_REVIEW_STATUSES.accepted
++          : BUILDER_REVIEW_STATUSES.pending,
++        attempts: current.attempts + 1,
++        reviewerPasses: isReviewer ? current.reviewerPasses + 1 : current.reviewerPasses,
++        assignedProvider: actorProvider,
++        lastError: '',
++      }));
++      await appendBuilderRunEvent(runState, {
++        kind: 'slice_pass_started',
++        summary: `${actorLabel} started: ${task.title}`,
++        taskId: task.id,
++        passNumber,
++        actorType,
++        actorProvider,
++        actorModel,
++      });
+ 
+       const actorWriter = new BufferedWriter(
+         `${sessionId}-${actorType}-${task.id}-pass-${passNumber}`,
+@@ -1499,6 +1996,27 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+           sessionHistory: actorWriter.getSessionHistory(),
+         });
+         sendTaskUpdate(writer, sessionId, provider, `${actorLabel} completed: ${task.title}`, 'completed');
++        await updateBuilderTaskState(runState, task.id, {
++          status: BUILDER_TASK_STATUSES.reviewPending,
++          reviewStatus: BUILDER_REVIEW_STATUSES.pending,
++          assignedProvider: actorProvider,
++          assignedSessionId: result.sessionId || `${sessionId}-${actorType}-${task.id}-pass-${passNumber}`,
++          lastSummary: result.text || '',
++          lastError: result.errors.join(' | '),
++          touchedFiles: passArtifact.touchedFiles,
++          artifacts: [passArtifact.artifactPath],
++        });
++        await appendBuilderRunEvent(runState, {
++          kind: 'slice_pass_completed',
++          summary: `${actorLabel} completed: ${task.title}`,
++          taskId: task.id,
++          passNumber,
++          actorType,
++          actorProvider,
++          actorModel,
++          artifactPath: passArtifact.artifactPath,
++          touchedFiles: passArtifact.touchedFiles,
++        });
+         sendAssistantText(writer, sessionId, provider, [
+           `### ${actorLabel} summary`,
+           result.text || 'No summary captured.',
+@@ -1546,6 +2064,27 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+         }
+ 
+         sendAssistantText(writer, sessionId, provider, `### ${actorLabel} failed\n${message}`);
++        await updateBuilderTaskState(runState, task.id, {
++          status: BUILDER_TASK_STATUSES.failed,
++          reviewStatus: BUILDER_REVIEW_STATUSES.failed,
++          assignedProvider: actorProvider,
++          assignedSessionId: partialResult.sessionId || `${sessionId}-${actorType}-${task.id}-pass-${passNumber}`,
++          lastSummary: partialResult.text || '',
++          lastError: [...partialResult.errors, message].join(' | '),
++          touchedFiles: partialArtifact.touchedFiles,
++          artifacts: partialArtifact.artifactPath ? [partialArtifact.artifactPath] : [],
++        });
++        await appendBuilderRunEvent(runState, {
++          kind: 'slice_pass_failed',
++          summary: `${actorLabel} failed: ${task.title}`,
++          taskId: task.id,
++          passNumber,
++          actorType,
++          actorProvider,
++          actorModel,
++          message,
++          artifactPath: partialArtifact.artifactPath,
++        });
+         return {
+           ok: false,
+           task,
+@@ -1562,9 +2101,50 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       }
+     };
+ 
+-    sendTaskUpdate(writer, sessionId, provider, `Planner finished. Dispatching ${workerTasks.length} worker task(s) with concurrency ${parallelWorkers}`, 'in_progress');
++    await setBuilderRunPhase(runState, BUILDER_RUN_PHASES.workerExecution, {
++      lastEvent: `Planner finished. Dispatching ${workerTasks.length} worker task(s) with concurrency ${parallelWorkers}`,
++    });
++    await reportStage(`Planner finished. Dispatching ${workerTasks.length} worker task(s) with concurrency ${parallelWorkers}`, 'in_progress', {
++      stage: BUILDER_RUN_PHASES.workerExecution,
++    });
+ 
+-    const workerResults = await runItemsWithConcurrency(workerTasks, parallelWorkers, async (task, index) => {
++    const workerResults = await runTaskGraphWithConcurrency({
++      tasks: workerTasks,
++      limit: parallelWorkers,
++      onForcedScheduling: async (task) => {
++        await appendBuilderRunEvent(runState, {
++          kind: 'dependency_deadlock_fallback',
++          summary: `Dependency deadlock fallback used for Task ${task.id}: ${task.title}`,
++          taskId: task.id,
++          dependsOn: task.dependsOn || [],
++        });
++      },
++      createBlockedResult: async (task, _index, blockedDependencies) => {
++        const message = blockedDependencies.length > 0
++          ? `Task ${task.id} was not started because dependencies failed: ${blockedDependencies.join(', ')}.`
++          : `Task ${task.id} could not be scheduled because its dependencies were not satisfied.`;
++        await updateBuilderTaskState(runState, task.id, {
++          status: BUILDER_TASK_STATUSES.blocked,
++          reviewStatus: BUILDER_REVIEW_STATUSES.failed,
++          lastError: message,
++        });
++        await appendBuilderRunEvent(runState, {
++          kind: 'task_blocked',
++          summary: message,
++          taskId: task.id,
++          blockedDependencies,
++        });
++        return {
++          ok: false,
++          task,
++          summary: '',
++          errors: [message],
++          childSessionId: `${sessionId}-blocked-${task.id}`,
++          reviewTrail: [],
++          blockedDependencies,
++        };
++      },
++      worker: async (task, index) => {
+       if (runState.aborted) {
+         return {
+           ok: false,
+@@ -1660,7 +2240,24 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+         }
+ 
+         if (plannerDecision.decision === 'accept') {
+-          sendTaskUpdate(writer, sessionId, provider, `Planner accepted Task ${currentTask.id}: ${currentTask.title}`, 'completed');
++          await updateBuilderTaskState(runState, currentTask.id, {
++            ...currentTask,
++            status: BUILDER_TASK_STATUSES.accepted,
++            reviewStatus: BUILDER_REVIEW_STATUSES.accepted,
++            acceptedByPlanner: true,
++            reviewTrail,
++            lastSummary: [
++              passResult.summary,
++              plannerDecision.reason ? `Planner acceptance: ${plannerDecision.reason}` : '',
++            ].filter(Boolean).join('\n\n'),
++            lastError: passResult.errors.join(' | '),
++            touchedFiles: passResult.touchedFiles,
++            artifacts: passResult.artifactPath ? [passResult.artifactPath] : [],
++          });
++          await reportStage(`Planner accepted Task ${currentTask.id}: ${currentTask.title}`, 'completed', {
++            stage: BUILDER_RUN_PHASES.workerExecution,
++            taskId: currentTask.id,
++          });
+           return {
+             ...passResult,
+             ok: true,
+@@ -1680,17 +2277,49 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+           reviewerPassesUsed += 1;
+           plannerFeedback = [plannerDecision.reason, plannerDecision.feedback].filter(Boolean).join('\n\n');
+           nextActorType = 'reviewer';
+-          sendTaskUpdate(writer, sessionId, provider, `Planner requested slice reviewer for Task ${currentTask.id}: ${currentTask.title}`, 'in_progress');
++          await updateBuilderTaskState(runState, currentTask.id, {
++            ...currentTask,
++            status: BUILDER_TASK_STATUSES.reviewerRequested,
++            reviewStatus: BUILDER_REVIEW_STATUSES.changesRequested,
++            reviewTrail,
++            lastError: plannerFeedback,
++          });
++          await reportStage(`Planner requested slice reviewer for Task ${currentTask.id}: ${currentTask.title}`, 'in_progress', {
++            stage: BUILDER_RUN_PHASES.workerExecution,
++            taskId: currentTask.id,
++          });
+           continue;
+         }
+ 
+         plannerFeedback = [plannerDecision.reason, plannerDecision.feedback].filter(Boolean).join('\n\n');
+         nextActorType = 'worker';
+-        sendTaskUpdate(writer, sessionId, provider, `Planner requested a fresh worker pass for Task ${currentTask.id}: ${currentTask.title}`, 'in_progress');
++        await updateBuilderTaskState(runState, currentTask.id, {
++          ...currentTask,
++          status: BUILDER_TASK_STATUSES.reworkRequested,
++          reviewStatus: BUILDER_REVIEW_STATUSES.changesRequested,
++          reviewTrail,
++          lastError: plannerFeedback,
++        });
++        await reportStage(`Planner requested a fresh worker pass for Task ${currentTask.id}: ${currentTask.title}`, 'in_progress', {
++          stage: BUILDER_RUN_PHASES.workerExecution,
++          taskId: currentTask.id,
++        });
+       }
+ 
+       const failureMessage = `Planner did not accept Task ${currentTask.id} within ${maxTaskPasses} pass(es).`;
+       sendAssistantText(writer, sessionId, provider, `### Planner checkpoint for Task ${currentTask.id}\n${failureMessage}`);
++      await updateBuilderTaskState(runState, currentTask.id, {
++        ...currentTask,
++        status: BUILDER_TASK_STATUSES.failed,
++        reviewStatus: BUILDER_REVIEW_STATUSES.failed,
++        reviewTrail,
++        lastError: failureMessage,
++      });
++      await appendBuilderRunEvent(runState, {
++        kind: 'task_failed',
++        summary: failureMessage,
++        taskId: currentTask.id,
++      });
+       return {
+         ok: false,
+         task: currentTask,
+@@ -1700,10 +2329,15 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+         acceptedByPlanner: false,
+         reviewTrail,
+       };
+-    });
++    }});
+ 
+     if (runState.aborted) {
+-      sendTaskUpdate(writer, sessionId, provider, 'Builder workflow aborted during worker execution', 'failed');
++      await reportStage('Builder workflow aborted during worker execution', 'failed', {
++        stage: BUILDER_RUN_PHASES.aborted,
++      });
++      await setBuilderRunOutcome(runState, 'aborted', BUILDER_STOP_REASONS.aborted, {
++        lastEvent: 'Builder workflow aborted during worker execution',
++      });
+       sendNormalized(writer, { kind: 'complete', sessionId, provider, success: false, aborted: true, exitCode: 1 });
+       return;
+     }
+@@ -1715,11 +2349,25 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+         '',
+         formatWorkerResults(workerResults),
+       ].join('\n'));
++      await appendBuilderRunEvent(runState, {
++        kind: 'worker_execution_failed',
++        summary: 'Some workers failed before integration',
++        failedTaskIds: failedWorkers.map((result) => result.task.id),
++      });
++      await setBuilderRunOutcome(runState, 'failed', BUILDER_STOP_REASONS.failed, {
++        lastEvent: 'Some workers failed before integration',
++        errorMessage: failedWorkers.map((result) => `Task ${result.task.id}: ${result.errors.join(' | ')}`).join('\n'),
++      });
+       sendNormalized(writer, { kind: 'complete', sessionId, provider, success: false, exitCode: 1 });
+       return;
+     }
+ 
+-    sendTaskUpdate(writer, sessionId, provider, 'All workers completed. Starting final integration pass', 'in_progress');
++    await setBuilderRunPhase(runState, BUILDER_RUN_PHASES.integration, {
++      lastEvent: 'All workers completed. Starting final integration pass',
++    });
++    await reportStage('All workers completed. Starting final integration pass', 'in_progress', {
++      stage: BUILDER_RUN_PHASES.integration,
++    });
+ 
+     await runProviderTask({
+       provider,
+@@ -1753,15 +2401,29 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       },
+       writer,
+     });
++    await appendBuilderRunEvent(runState, {
++      kind: 'integration_completed',
++      summary: 'Final integration pass completed',
++    });
+ 
+     if (runState.aborted) {
+-      sendTaskUpdate(writer, sessionId, provider, 'Builder workflow aborted during final integration', 'failed');
++      await reportStage('Builder workflow aborted during final integration', 'failed', {
++        stage: BUILDER_RUN_PHASES.aborted,
++      });
++      await setBuilderRunOutcome(runState, 'aborted', BUILDER_STOP_REASONS.aborted, {
++        lastEvent: 'Builder workflow aborted during final integration',
++      });
+       sendNormalized(writer, { kind: 'complete', sessionId, provider, success: false, aborted: true, exitCode: 1 });
+       return;
+     }
+ 
+     if (builderConfig.qa.enabled && qaProvider && qaModel) {
+-      sendTaskUpdate(writer, sessionId, provider, `Cross-provider QA started with ${qaProvider}`, 'in_progress');
++      await setBuilderRunPhase(runState, BUILDER_RUN_PHASES.qa, {
++        lastEvent: `Cross-provider QA started with ${qaProvider}`,
++      });
++      await reportStage(`Cross-provider QA started with ${qaProvider}`, 'in_progress', {
++        stage: BUILDER_RUN_PHASES.qa,
++      });
+ 
+       const qaWriter = new BufferedWriter(`${sessionId}-qa`, qaProvider, (childSessionId, childProvider) => {
+         registerChildSession(childSessionId, childProvider, 'qa');
+@@ -1806,13 +2468,24 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       });
+ 
+       if (runState.aborted) {
+-        sendTaskUpdate(writer, sessionId, provider, 'Builder workflow aborted during cross-provider QA', 'failed');
++        await reportStage('Builder workflow aborted during cross-provider QA', 'failed', {
++          stage: BUILDER_RUN_PHASES.aborted,
++        });
++        await setBuilderRunOutcome(runState, 'aborted', BUILDER_STOP_REASONS.aborted, {
++          lastEvent: 'Builder workflow aborted during cross-provider QA',
++        });
+         sendNormalized(writer, { kind: 'complete', sessionId, provider, success: false, aborted: true, exitCode: 1 });
+         return;
+       }
+ 
+       const qaResult = qaWriter.getSummary();
+-      sendTaskUpdate(writer, sessionId, provider, `Cross-provider QA completed with ${qaProvider}`, 'completed');
++      await reportStage(`Cross-provider QA completed with ${qaProvider}`, 'completed', {
++        stage: BUILDER_RUN_PHASES.qa,
++      });
++      await appendBuilderRunEvent(runState, {
++        kind: 'qa_completed',
++        summary: `Cross-provider QA completed with ${qaProvider}`,
++      });
+       if (qaResult.text) {
+         sendAssistantText(writer, sessionId, provider, `### Cross-provider QA summary (${qaProvider})\n${qaResult.text}`);
+       }
+@@ -1822,6 +2495,9 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+     }
+ 
+     if (builderConfig.merge.command) {
++      await setBuilderRunPhase(runState, BUILDER_RUN_PHASES.merge, {
++        lastEvent: 'Merge or push stage started',
++      });
+       const mergeApproval = await maybeApproveStage({
+         enabled: Boolean(builderConfig.approvals.merge),
+         writer,
+@@ -1839,10 +2515,18 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+         await new Promise((resolve) => {
+           execFile('sh', ['-lc', builderConfig.merge.command], { cwd: projectPath }, () => resolve());
+         });
++        await appendBuilderRunEvent(runState, {
++          kind: 'merge_command_executed',
++          summary: 'Merge or push command executed',
++          command: builderConfig.merge.command,
++        });
+       }
+     }
+ 
+     if (builderConfig.production.command) {
++      await setBuilderRunPhase(runState, BUILDER_RUN_PHASES.production, {
++        lastEvent: 'Production deployment stage started',
++      });
+       const productionApproval = await maybeApproveStage({
+         enabled: Boolean(builderConfig.approvals.production),
+         writer,
+@@ -1857,19 +2541,41 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+         await new Promise((resolve) => {
+           execFile('sh', ['-lc', builderConfig.production.command], { cwd: projectPath }, () => resolve());
+         });
++        await appendBuilderRunEvent(runState, {
++          kind: 'production_command_executed',
++          summary: 'Production deployment command executed',
++          command: builderConfig.production.command,
++        });
+       }
+     }
+ 
+-    sendTaskUpdate(writer, sessionId, provider, 'Builder workflow completed', 'completed');
++    await reportStage('Builder workflow completed', 'completed', {
++      stage: BUILDER_RUN_PHASES.completed,
++    });
++    await setBuilderRunOutcome(runState, 'completed', BUILDER_STOP_REASONS.completed, {
++      lastEvent: 'Builder workflow completed',
++    });
+     sendNormalized(writer, { kind: 'complete', sessionId, provider, success: true, exitCode: 0 });
+   } catch (error) {
+     if (runState.aborted) {
++      await setBuilderRunOutcome(runState, 'aborted', BUILDER_STOP_REASONS.aborted, {
++        lastEvent: 'Builder workflow aborted',
++      });
+       sendNormalized(writer, { kind: 'complete', sessionId, provider, success: false, aborted: true, exitCode: 1 });
+       return;
+     }
+ 
+     const message = error instanceof Error ? error.message : String(error);
+     sendAssistantText(writer, sessionId, provider, `Builder workflow failed.\n\n\`\`\`text\n${message}\n\`\`\``);
++    await appendBuilderRunEvent(runState, {
++      kind: 'workflow_failed',
++      summary: 'Builder workflow failed',
++      message,
++    });
++    await setBuilderRunOutcome(runState, 'failed', BUILDER_STOP_REASONS.failed, {
++      lastEvent: 'Builder workflow failed',
++      errorMessage: message,
++    });
+     sendNormalized(writer, { kind: 'error', sessionId, provider, content: message });
+   } finally {
+     for (const [childSessionId, metadata] of runState.childSessions.entries()) {

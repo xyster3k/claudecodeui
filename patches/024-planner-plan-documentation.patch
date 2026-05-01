@@ -1,8 +1,8 @@
 diff --git a/server/builder-mode.js b/server/builder-mode.js
-index c4bb6f2..787cb3a 100644
+index c4bb6f2..f89d935 100644
 --- a/server/builder-mode.js
 +++ b/server/builder-mode.js
-@@ -549,6 +549,50 @@ const buildPrdMarkdown = ({
+@@ -549,9 +549,54 @@ const buildPrdMarkdown = ({
    formatBulletList(tasks.map((task) => `Task ${task.id}: ${task.title}`)),
  ].join('\n');
  
@@ -53,7 +53,11 @@ index c4bb6f2..787cb3a 100644
  const ensureDirectories = async (projectPath) => {
    await fs.mkdir(path.join(projectPath, TASKMASTER_DIR, 'docs'), { recursive: true });
    await fs.mkdir(path.join(projectPath, TASKMASTER_DIR, 'tasks'), { recursive: true });
-@@ -560,10 +604,11 @@ const writeJsonFile = async (filePath, value) => {
++  await fs.mkdir(path.join(projectPath, 'Builds'), { recursive: true });
+   await fs.mkdir(path.join(projectPath, BUILDER_ARTIFACT_DIR), { recursive: true });
+   await fs.mkdir(path.join(projectPath, BUILDER_ARTIFACT_DIR, 'logs'), { recursive: true });
+ };
+@@ -560,10 +605,11 @@ const writeJsonFile = async (filePath, value) => {
    await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
  };
  
@@ -62,11 +66,11 @@ index c4bb6f2..787cb3a 100644
    await ensureDirectories(projectPath);
  
    const prdPath = path.join(projectPath, TASKMASTER_DIR, 'docs', `cloudcli-builder-${sanitizeFileName(sessionId)}.md`);
-+  const planPath = path.join(projectPath, TASKMASTER_DIR, 'docs', `cloudcli-builder-plan-${sanitizeFileName(sessionId)}.md`);
++  const planPath = path.join(projectPath, 'Builds', `cloudcli-builder-plan-${sanitizeFileName(sessionId)}.md`);
    const tasksPath = path.join(projectPath, TASKMASTER_DIR, 'tasks', 'tasks.json');
    const runPath = path.join(projectPath, BUILDER_ARTIFACT_DIR, `${sanitizeFileName(sessionId)}.json`);
    const latestPath = path.join(projectPath, BUILDER_ARTIFACT_DIR, 'latest-run.json');
-@@ -611,9 +656,10 @@ const persistRunArtifacts = async (projectPath, sessionId, prdMarkdown, tasks, c
+@@ -611,9 +657,10 @@ const persistRunArtifacts = async (projectPath, sessionId, prdMarkdown, tasks, c
  
    await fs.mkdir(path.dirname(configExamplePath), { recursive: true });
    await fs.writeFile(prdPath, `${prdMarkdown}\n`, 'utf8');
@@ -79,7 +83,7 @@ index c4bb6f2..787cb3a 100644
    try {
      await fs.access(logPath);
    } catch {
-@@ -628,6 +674,7 @@ const persistRunArtifacts = async (projectPath, sessionId, prdMarkdown, tasks, c
+@@ -628,6 +675,7 @@ const persistRunArtifacts = async (projectPath, sessionId, prdMarkdown, tasks, c
  
    return {
      prdPath,
@@ -87,7 +91,7 @@ index c4bb6f2..787cb3a 100644
      tasksPath,
      runPath,
      latestPath,
-@@ -655,10 +702,12 @@ const createBuilderRunRecord = ({
+@@ -655,10 +703,12 @@ const createBuilderRunRecord = ({
      updatedAt: timestamp,
      config: config || {},
      prdPath: '',
@@ -100,7 +104,7 @@ index c4bb6f2..787cb3a 100644
      childSessions: [],
      tasks: [],
      metrics: summarizeBuilderTaskMetrics([]),
-@@ -724,6 +773,9 @@ const setBuilderRunPhase = async (runState, phase, fields = {}) => {
+@@ -724,6 +774,9 @@ const setBuilderRunPhase = async (runState, phase, fields = {}) => {
    if (Object.prototype.hasOwnProperty.call(fields, 'projectStateSummary')) {
      runState.record.projectStateSummary = readString(fields.projectStateSummary) || '';
    }
@@ -110,7 +114,7 @@ index c4bb6f2..787cb3a 100644
    await persistBuilderRunState(runState);
  };
  
-@@ -1446,6 +1498,9 @@ const fallbackPlan = (command, projectPath, maxWorkers, parallelWorkers) => {
+@@ -1446,6 +1499,9 @@ const fallbackPlan = (command, projectPath, maxWorkers, parallelWorkers) => {
  
    return {
      projectStateSummary: `Planner fallback used for project \`${projectPath}\` because structured planning output was not parsed successfully.`,
@@ -120,7 +124,7 @@ index c4bb6f2..787cb3a 100644
      languages: ['Primary site language'],
      pages: ['Relevant feature entry points'],
      tasks,
-@@ -1458,6 +1513,16 @@ const fallbackPlan = (command, projectPath, maxWorkers, parallelWorkers) => {
+@@ -1458,6 +1514,16 @@ const fallbackPlan = (command, projectPath, maxWorkers, parallelWorkers) => {
        tasks,
        maxParallelWorkers: parallelWorkers,
      }),
@@ -137,7 +141,7 @@ index c4bb6f2..787cb3a 100644
    };
  };
  
-@@ -1478,6 +1543,8 @@ const buildPlannerPrompt = ({ command, projectPath, maxWorkers, parallelWorkers
+@@ -1478,6 +1544,8 @@ const buildPlannerPrompt = ({ command, projectPath, maxWorkers, parallelWorkers
    '- Do not invent pricing/localization tasks unless the request actually implies them.',
    '- Prefer meaningful slices such as ingestion pipeline, schema/data model, API layer, dossier UI, graph view, search subsystem, etc.',
    '- Include a short project-state summary based on what you inspected.',
@@ -146,7 +150,7 @@ index c4bb6f2..787cb3a 100644
    '- Mention the main touched areas or file groups when you can infer them.',
    '- Use task dependencies when one slice clearly depends on another slice finishing first.',
    '',
-@@ -1488,6 +1555,9 @@ const buildPlannerPrompt = ({ command, projectPath, maxWorkers, parallelWorkers
+@@ -1488,6 +1556,9 @@ const buildPlannerPrompt = ({ command, projectPath, maxWorkers, parallelWorkers
    '```json',
    JSON.stringify({
      project_state_summary: 'string',
@@ -156,7 +160,7 @@ index c4bb6f2..787cb3a 100644
      languages: ['string'],
      pages: ['string'],
      tasks: [
-@@ -1520,11 +1590,19 @@ const parsePlannerOutput = ({ text, command, projectPath, maxWorkers, parallelWo
+@@ -1520,11 +1591,19 @@ const parsePlannerOutput = ({ text, command, projectPath, maxWorkers, parallelWo
      const projectStateSummary = readString(parsed?.project_state_summary)
        || readString(parsed?.projectStateSummary)
        || 'Planner did not provide a project-state summary.';
@@ -176,7 +180,7 @@ index c4bb6f2..787cb3a 100644
        languages: languages.length > 0 ? languages : ['Primary site language'],
        pages: pages.length > 0 ? pages : ['Relevant feature entry points'],
        tasks,
-@@ -1537,6 +1615,16 @@ const parsePlannerOutput = ({ text, command, projectPath, maxWorkers, parallelWo
+@@ -1537,6 +1616,16 @@ const parsePlannerOutput = ({ text, command, projectPath, maxWorkers, parallelWo
          tasks,
          maxParallelWorkers: parallelWorkers,
        }),
@@ -193,7 +197,7 @@ index c4bb6f2..787cb3a 100644
      };
    } catch {
      return fallbackPlan(command, projectPath, maxWorkers, parallelWorkers);
-@@ -1719,26 +1807,31 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+@@ -1719,26 +1808,31 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
      let plannerSessionId = plannerWriter.getSessionId();
      const workerTasks = plannerResult.tasks;
      const prdMarkdown = plannerResult.prdMarkdown;
@@ -226,7 +230,7 @@ index c4bb6f2..787cb3a 100644
        lastEvent: 'Planner completed and tasks were created',
      });
      await appendBuilderRunEvent(runState, {
-@@ -1751,7 +1844,9 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+@@ -1751,7 +1845,9 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
      sendAssistantText(writer, sessionId, provider, [
        prdMarkdown,
        '',
@@ -237,7 +241,7 @@ index c4bb6f2..787cb3a 100644
        '',
        `Planner model: \`${plannerModel || options.model || 'default'}\``,
        `Parallel worker limit: ${parallelWorkers}`,
-@@ -1770,8 +1865,9 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+@@ -1770,8 +1866,9 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
      ].filter(Boolean).join('\n'));
      await appendBuilderRunEvent(runState, {
        kind: 'planner_prd_persisted',

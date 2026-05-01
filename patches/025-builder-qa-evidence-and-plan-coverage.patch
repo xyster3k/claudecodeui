@@ -1,0 +1,474 @@
+--- a/server/builder-mode.js	2026-05-01 12:23:51
++++ b/server/builder-mode.js	2026-05-01 12:22:47
+@@ -549,6 +549,21 @@
+   formatBulletList(tasks.map((task) => `Task ${task.id}: ${task.title}`)),
+ ].join('\n');
+ 
++const buildUserRequestMarkdown = ({
++  command,
++  projectPath,
++  provider,
++}) => [
++  '## Builder User Request',
++  '',
++  `**Project**: \`${projectPath || 'current workspace'}\``,
++  `**Primary Provider**: \`${provider || 'unknown'}\``,
++  `**Captured At**: ${new Date().toISOString()}`,
++  '',
++  '### Request',
++  command || 'No request text captured.',
++].join('\n');
++
+ const buildPlannerPlanMarkdown = ({
+   command,
+   projectPath,
+@@ -591,8 +606,71 @@
+     task.dependsOn?.length ? `Depends on: ${task.dependsOn.join(', ')}` : '',
+     task.fileGroups?.length ? `File groups: ${task.fileGroups.join(', ')}` : '',
+   ].filter(Boolean).join('\n\n')).join('\n\n'),
++].join('\n');
++
++const buildPlanCoverageReviewMarkdown = ({
++  command,
++  projectPath,
++  approved,
++  coverageSummary,
++  missingRequirements,
++  ambiguousPoints,
++  outOfScopeRisks,
++}) => [
++  '## Plan Coverage Review',
++  '',
++  `**Project**: \`${projectPath || 'current workspace'}\``,
++  `**Approved For Execution**: ${approved ? 'yes' : 'no'}`,
++  '',
++  '### Original Request',
++  command || 'No request text captured.',
++  '',
++  '### Coverage Summary',
++  coverageSummary || 'No summary provided.',
++  '',
++  '### Missing Requirements',
++  formatBulletList(missingRequirements),
++  '',
++  '### Ambiguous Points',
++  formatBulletList(ambiguousPoints),
++  '',
++  '### Out-Of-Scope Risks',
++  formatBulletList(outOfScopeRisks),
+ ].join('\n');
+ 
++const buildQaBundleMarkdown = ({
++  command,
++  projectPath,
++  requestPath,
++  prdPath,
++  planPath,
++  planReviewPath,
++  tasksPath,
++  workerResults,
++}) => [
++  '## QA Evaluation Bundle',
++  '',
++  `**Project**: \`${projectPath || 'current workspace'}\``,
++  '',
++  '### Primary Acceptance Source',
++  'The original user request is the primary source of truth. The planner plan and coverage review constrain scope and expected delivery.',
++  '',
++  '### Original Request',
++  command || 'No request text captured.',
++  '',
++  '### Artifact Paths',
++  formatBulletList([
++    `User request: \`${requestPath}\``,
++    `PRD: \`${prdPath}\``,
++    `Planner plan: \`${planPath}\``,
++    `Plan coverage review: \`${planReviewPath}\``,
++    `Tasks: \`${tasksPath}\``,
++  ]),
++  '',
++  '### Worker Results Summary',
++  workerResults || 'No worker results summary available.',
++].join('\n');
++
+ const ensureDirectories = async (projectPath) => {
+   await fs.mkdir(path.join(projectPath, TASKMASTER_DIR, 'docs'), { recursive: true });
+   await fs.mkdir(path.join(projectPath, TASKMASTER_DIR, 'tasks'), { recursive: true });
+@@ -605,11 +683,16 @@
+   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+ };
+ 
+-const persistRunArtifacts = async (projectPath, sessionId, prdMarkdown, planMarkdown, tasks, config) => {
++const persistRunArtifacts = async (projectPath, sessionId, requestMarkdown, prdMarkdown, planMarkdown, tasks, config) => {
+   await ensureDirectories(projectPath);
+ 
++  const requestPath = path.join(projectPath, 'Builds', `cloudcli-builder-request-${sanitizeFileName(sessionId)}.md`);
+   const prdPath = path.join(projectPath, TASKMASTER_DIR, 'docs', `cloudcli-builder-${sanitizeFileName(sessionId)}.md`);
+   const planPath = path.join(projectPath, 'Builds', `cloudcli-builder-plan-${sanitizeFileName(sessionId)}.md`);
++  const planReviewPath = path.join(projectPath, 'Builds', `cloudcli-builder-plan-review-${sanitizeFileName(sessionId)}.md`);
++  const planReviewJsonPath = path.join(projectPath, 'Builds', `cloudcli-builder-plan-review-${sanitizeFileName(sessionId)}.json`);
++  const qaBundlePath = path.join(projectPath, 'Builds', `cloudcli-builder-qa-bundle-${sanitizeFileName(sessionId)}.md`);
++  const qaBundleJsonPath = path.join(projectPath, 'Builds', `cloudcli-builder-qa-bundle-${sanitizeFileName(sessionId)}.json`);
+   const tasksPath = path.join(projectPath, TASKMASTER_DIR, 'tasks', 'tasks.json');
+   const runPath = path.join(projectPath, BUILDER_ARTIFACT_DIR, `${sanitizeFileName(sessionId)}.json`);
+   const latestPath = path.join(projectPath, BUILDER_ARTIFACT_DIR, 'latest-run.json');
+@@ -656,11 +739,16 @@
+   };
+ 
+   await fs.mkdir(path.dirname(configExamplePath), { recursive: true });
++  await fs.writeFile(requestPath, `${requestMarkdown}\n`, 'utf8');
+   await fs.writeFile(prdPath, `${prdMarkdown}\n`, 'utf8');
+   await fs.writeFile(planPath, `${planMarkdown}\n`, 'utf8');
++  await fs.writeFile(planReviewPath, '', 'utf8');
++  await writeJsonFile(planReviewJsonPath, {});
++  await fs.writeFile(qaBundlePath, '', 'utf8');
++  await writeJsonFile(qaBundleJsonPath, {});
+   await writeJsonFile(tasksPath, { tasks });
+-  await writeJsonFile(runPath, { sessionId, prdPath, planPath, tasksPath, logPath, config });
+-  await writeJsonFile(latestPath, { sessionId, prdPath, planPath, tasksPath, logPath, config });
++  await writeJsonFile(runPath, { sessionId, requestPath, prdPath, planPath, planReviewPath, planReviewJsonPath, qaBundlePath, qaBundleJsonPath, tasksPath, logPath, config });
++  await writeJsonFile(latestPath, { sessionId, requestPath, prdPath, planPath, planReviewPath, planReviewJsonPath, qaBundlePath, qaBundleJsonPath, tasksPath, logPath, config });
+   try {
+     await fs.access(logPath);
+   } catch {
+@@ -674,8 +762,13 @@
+   }
+ 
+   return {
++    requestPath,
+     prdPath,
+     planPath,
++    planReviewPath,
++    planReviewJsonPath,
++    qaBundlePath,
++    qaBundleJsonPath,
+     tasksPath,
+     runPath,
+     latestPath,
+@@ -702,13 +795,20 @@
+     createdAt: timestamp,
+     updatedAt: timestamp,
+     config: config || {},
++    requestPath: '',
+     prdPath: '',
+     planPath: '',
++    planReviewPath: '',
++    planReviewJsonPath: '',
++    qaBundlePath: '',
++    qaBundleJsonPath: '',
+     tasksPath: '',
+     logPath: '',
+     plannerSessionId: '',
+     projectStateSummary: '',
+     plannerExecutionPlan: '',
++    planCoverageApproved: null,
++    planCoverageSummary: '',
+     childSessions: [],
+     tasks: [],
+     metrics: summarizeBuilderTaskMetrics([]),
+@@ -777,6 +877,12 @@
+   if (Object.prototype.hasOwnProperty.call(fields, 'plannerExecutionPlan')) {
+     runState.record.plannerExecutionPlan = readString(fields.plannerExecutionPlan) || '';
+   }
++  if (Object.prototype.hasOwnProperty.call(fields, 'planCoverageApproved')) {
++    runState.record.planCoverageApproved = typeof fields.planCoverageApproved === 'boolean' ? fields.planCoverageApproved : null;
++  }
++  if (Object.prototype.hasOwnProperty.call(fields, 'planCoverageSummary')) {
++    runState.record.planCoverageSummary = readString(fields.planCoverageSummary) || '';
++  }
+   await persistBuilderRunState(runState);
+ };
+ 
+@@ -1629,6 +1735,78 @@
+     };
+   } catch {
+     return fallbackPlan(command, projectPath, maxWorkers, parallelWorkers);
++  }
++};
++
++const buildPlanCoveragePrompt = ({
++  command,
++  prdMarkdown,
++  planMarkdown,
++  tasks,
++  projectPath,
++}) => [
++  'You are reviewing whether a planner output fully covers the user request before implementation starts.',
++  `Project root: ${projectPath}`,
++  '',
++  'Your job:',
++  '- Compare the original user request to the PRD, execution plan, and worker task breakdown.',
++  '- Decide whether the plan is complete enough to begin implementation.',
++  '- Flag missing requested outcomes, ambiguous points, and out-of-scope drift.',
++  '- Do not review code. Review only planning coverage.',
++  '',
++  'Original request:',
++  command,
++  '',
++  'PRD:',
++  prdMarkdown,
++  '',
++  'Execution plan:',
++  planMarkdown,
++  '',
++  'Task breakdown:',
++  JSON.stringify(tasks, null, 2),
++  '',
++  'Return only valid JSON in this shape:',
++  '```json',
++  JSON.stringify({
++    approved: true,
++    coverage_summary: 'string',
++    missing_requirements: ['string'],
++    ambiguous_points: ['string'],
++    out_of_scope_risks: ['string'],
++  }, null, 2),
++  '```',
++].join('\n');
++
++const parsePlanCoverageReview = (text) => {
++  const jsonBlock = extractJsonBlock(text);
++  if (!jsonBlock) {
++    return {
++      approved: false,
++      coverageSummary: 'Plan coverage review did not return structured output.',
++      missingRequirements: ['The system could not confirm that the plan covers the full user request.'],
++      ambiguousPoints: [],
++      outOfScopeRisks: [],
++    };
++  }
++
++  try {
++    const parsed = JSON.parse(stripCodeFences(jsonBlock));
++    return {
++      approved: Boolean(parsed?.approved),
++      coverageSummary: readString(parsed?.coverage_summary) || readString(parsed?.coverageSummary) || 'No coverage summary provided.',
++      missingRequirements: readStringArray(parsed?.missing_requirements || parsed?.missingRequirements),
++      ambiguousPoints: readStringArray(parsed?.ambiguous_points || parsed?.ambiguousPoints),
++      outOfScopeRisks: readStringArray(parsed?.out_of_scope_risks || parsed?.outOfScopeRisks),
++    };
++  } catch {
++    return {
++      approved: false,
++      coverageSummary: 'Plan coverage review returned invalid JSON.',
++      missingRequirements: ['The system could not confirm that the plan covers the full user request.'],
++      ambiguousPoints: [],
++      outOfScopeRisks: [],
++    };
+   }
+ };
+ 
+@@ -1807,22 +1985,37 @@
+     });
+     let plannerSessionId = plannerWriter.getSessionId();
+     const workerTasks = plannerResult.tasks;
++    const requestMarkdown = buildUserRequestMarkdown({
++      command,
++      projectPath,
++      provider,
++    });
+     const prdMarkdown = plannerResult.prdMarkdown;
+     const planMarkdown = plannerResult.planMarkdown;
+     const {
++      requestPath,
+       prdPath,
+       planPath,
++      planReviewPath,
++      planReviewJsonPath,
++      qaBundlePath,
++      qaBundleJsonPath,
+       tasksPath,
+       runPath,
+       latestPath,
+       logPath,
+-    } = await persistRunArtifacts(projectPath, sessionId, prdMarkdown, planMarkdown, workerTasks.map((task) => createBuilderTaskRuntimeState(task)), effectiveConfig);
++    } = await persistRunArtifacts(projectPath, sessionId, requestMarkdown, prdMarkdown, planMarkdown, workerTasks.map((task) => createBuilderTaskRuntimeState(task)), effectiveConfig);
+     runState.paths.runPath = runPath;
+     runState.paths.latestPath = latestPath;
+     runState.paths.logPath = logPath;
+     await replaceBuilderTasks(runState, workerTasks, {
++      requestPath,
+       prdPath,
+       planPath,
++      planReviewPath,
++      planReviewJsonPath,
++      qaBundlePath,
++      qaBundleJsonPath,
+       tasksPath,
+       logPath,
+       plannerSessionId,
+@@ -1867,11 +2060,106 @@
+     await appendBuilderRunEvent(runState, {
+       kind: 'planner_prd_persisted',
+       summary: 'Planner PRD, plan, and task artifacts were persisted',
++      requestPath,
+       prdPath,
+       planPath,
+       tasksPath,
+     });
+ 
++    await reportStage('Reviewing planner coverage against the user request', 'in_progress', {
++      stage: BUILDER_RUN_PHASES.planning,
++    });
++    const planReviewWriter = new BufferedWriter(`${sessionId}-plan-review`, provider, registerChildSession);
++    await runProviderTask({
++      provider,
++      prompt: applyReasoningPrefix(buildPlanCoveragePrompt({
++        command,
++        prdMarkdown,
++        planMarkdown,
++        tasks: workerTasks,
++        projectPath,
++      }), plannerReasoning),
++      options: {
++        ...options,
++        cwd: projectPath,
++        projectPath,
++        model: plannerModel || options.model,
++      },
++      writer: planReviewWriter,
++    });
++
++    if (runState.aborted) {
++      await reportStage('Builder workflow aborted during plan coverage review', 'failed', {
++        stage: BUILDER_RUN_PHASES.aborted,
++      });
++      await setBuilderRunOutcome(runState, 'aborted', BUILDER_STOP_REASONS.aborted, {
++        lastEvent: 'Builder workflow aborted during plan coverage review',
++      });
++      sendNormalized(writer, { kind: 'complete', sessionId, provider, success: false, aborted: true, exitCode: 1 });
++      return;
++    }
++
++    const planCoverageReview = parsePlanCoverageReview(planReviewWriter.getSummary().text);
++    const planCoverageMarkdown = buildPlanCoverageReviewMarkdown({
++      command,
++      projectPath,
++      approved: planCoverageReview.approved,
++      coverageSummary: planCoverageReview.coverageSummary,
++      missingRequirements: planCoverageReview.missingRequirements,
++      ambiguousPoints: planCoverageReview.ambiguousPoints,
++      outOfScopeRisks: planCoverageReview.outOfScopeRisks,
++    });
++    await fs.writeFile(planReviewPath, `${planCoverageMarkdown}\n`, 'utf8');
++    await writeJsonFile(planReviewJsonPath, {
++      approved: planCoverageReview.approved,
++      coverageSummary: planCoverageReview.coverageSummary,
++      missingRequirements: planCoverageReview.missingRequirements,
++      ambiguousPoints: planCoverageReview.ambiguousPoints,
++      outOfScopeRisks: planCoverageReview.outOfScopeRisks,
++      reviewerSessionId: planReviewWriter.getSessionId(),
++    });
++    await setBuilderRunPhase(runState, BUILDER_RUN_PHASES.planning, {
++      planCoverageApproved: planCoverageReview.approved,
++      planCoverageSummary: planCoverageReview.coverageSummary,
++      lastEvent: planCoverageReview.approved
++        ? 'Planner coverage review approved the plan'
++        : 'Planner coverage review rejected the plan',
++    });
++    await appendBuilderRunEvent(runState, {
++      kind: 'plan_coverage_review_completed',
++      summary: planCoverageReview.approved
++        ? 'Plan coverage review approved the plan'
++        : 'Plan coverage review rejected the plan',
++      approved: planCoverageReview.approved,
++      reviewerSessionId: planReviewWriter.getSessionId(),
++      missingRequirements: planCoverageReview.missingRequirements,
++      ambiguousPoints: planCoverageReview.ambiguousPoints,
++      outOfScopeRisks: planCoverageReview.outOfScopeRisks,
++    });
++    sendAssistantText(writer, sessionId, provider, [
++      '### Plan Coverage Review',
++      planCoverageMarkdown,
++      '',
++      `Artifact: \`${planReviewPath}\``,
++    ].join('\n'));
++
++    if (!planCoverageReview.approved) {
++      await reportStage('Plan coverage review rejected the plan before implementation', 'failed', {
++        stage: BUILDER_RUN_PHASES.failed,
++      });
++      await setBuilderRunOutcome(runState, 'failed', BUILDER_STOP_REASONS.failed, {
++        lastEvent: 'Plan coverage review rejected the plan before implementation',
++        errorMessage: [
++          planCoverageReview.coverageSummary,
++          ...planCoverageReview.missingRequirements,
++          ...planCoverageReview.ambiguousPoints,
++          ...planCoverageReview.outOfScopeRisks,
++        ].filter(Boolean).join('\n'),
++      });
++      sendNormalized(writer, { kind: 'complete', sessionId, provider, success: false, exitCode: 1 });
++      return;
++    }
++
+     if (builderConfig.approvals.riskyChanges && RISKY_CHANGE_PATTERN.test(command)) {
+       await setBuilderRunPhase(runState, BUILDER_RUN_PHASES.approvals, {
+         lastEvent: 'Waiting for risky scope approval',
+@@ -2519,6 +2807,30 @@
+     }
+ 
+     if (builderConfig.qa.enabled && qaProvider && qaModel) {
++      const qaBundleMarkdown = buildQaBundleMarkdown({
++        command,
++        projectPath,
++        requestPath: runState.record?.requestPath || requestPath,
++        prdPath,
++        planPath,
++        planReviewPath,
++        tasksPath,
++        workerResults: formatWorkerResults(workerResults),
++      });
++      await fs.writeFile(qaBundlePath, `${qaBundleMarkdown}\n`, 'utf8');
++      await writeJsonFile(qaBundleJsonPath, {
++        command,
++        projectPath,
++        requestPath: runState.record?.requestPath || requestPath,
++        prdPath,
++        planPath,
++        planReviewPath,
++        tasksPath,
++        runPath,
++        logPath,
++        plannerSessionId,
++        workerResults,
++      });
+       await setBuilderRunPhase(runState, BUILDER_RUN_PHASES.qa, {
+         lastEvent: `Cross-provider QA started with ${qaProvider}`,
+       });
+@@ -2537,20 +2849,36 @@
+           `Primary build provider: ${provider}`,
+           `Your QA provider: ${qaProvider}`,
+           '',
++          `User request artifact: ${runState.record?.requestPath || requestPath}`,
++          `Planner plan artifact: ${planPath}`,
++          `Plan coverage review artifact: ${planReviewPath}`,
++          `QA evidence bundle artifact: ${qaBundlePath}`,
++          `Tasks artifact: ${tasksPath}`,
++          '',
+           'Original request:',
+           command,
+           '',
+           'Full PRD:',
+           prdMarkdown,
+           '',
++          'Planner execution plan:',
++          planMarkdown,
++          '',
++          'Plan coverage review:',
++          planCoverageMarkdown,
++          '',
+           'Worker results:',
+           formatWorkerResults(workerResults),
+           '',
+           'Context:',
+           '- The final integrator has already run.',
+           '- The repository as it exists right now is the source of truth.',
++          '- The original user request is the primary acceptance source.',
++          '- The planner plan and plan coverage review define what should be present and what should not drift out of scope.',
+           '',
+           'Requirements:',
++          '- First verify that the final repository matches the user request and the approved planner plan.',
++          '- Explicitly check for missing requested outcomes and out-of-scope drift before bug-hunting.',
+           '- Review the implementation for behavioral bugs, missing integration points, naming mismatches, regressions, and obvious edge cases.',
+           builderConfig.qa.allowEdits
+             ? '- When you find issues, fix them directly in the repository with targeted edits.'

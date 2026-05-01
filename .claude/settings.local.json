@@ -1,7 +1,26 @@
 {
   "permissions": {
     "allow": [
-      "Bash(node --check server/builder-mode.js)"
+      "Bash(node --check server/builder-mode.js)",
+      "Bash(ssh -i ~/.ssh/id_ed25519 -p 22022 xyster3k@46.62.207.69 \"docker ps --format ''{{.Names}} {{.Image}} {{.Status}}'' | head -20\")",
+      "Bash(ssh -i ~/.ssh/id_ed25519 -p 22022 xyster3k@46.62.207.69 \"ls ~/claudecodeui/ 2>/dev/null || ls ~/stack/ 2>/dev/null || find /home/xyster3k -maxdepth 3 -name ''docker-compose*'' -o -name ''Dockerfile'' 2>/dev/null | head -10\")",
+      "Bash(ssh -i ~/.ssh/id_ed25519 -p 22022 xyster3k@46.62.207.69 \"find /home/xyster3k -maxdepth 4 -name ''docker-compose*'' -o -name ''Dockerfile'' -o -name ''*.yml'' 2>/dev/null | head -20\")",
+      "Bash(ssh -i ~/.ssh/id_ed25519 -p 22022 xyster3k@46.62.207.69 \"docker inspect claudecodeui --format ''{{.Config.Image}}'' 2>/dev/null; docker inspect claudecodeui --format ''{{json .Config.Labels}}'' 2>/dev/null | head -5; docker inspect claudecodeui --format ''{{json .HostConfig.Binds}}'' 2>/dev/null\")",
+      "Bash(ssh -i ~/.ssh/id_ed25519 -p 22022 xyster3k@46.62.207.69 \"cat /srv/stack/docker-compose.yml\")",
+      "Bash(ssh -i ~/.ssh/id_ed25519 -p 22022 xyster3k@46.62.207.69 \"ls /srv/stack/claudecodeui/\")",
+      "Bash(ssh -i ~/.ssh/id_ed25519 -p 22022 xyster3k@46.62.207.69 \"cd /srv/stack/claudecodeui && git remote -v && git log --oneline -3\")",
+      "Bash(ssh -i ~/.ssh/id_ed25519 -p 22022 xyster3k@46.62.207.69 \"cd /srv/stack/claudecodeui && git pull origin main\")",
+      "Bash(ssh -i ~/.ssh/id_ed25519 -p 22022 xyster3k@46.62.207.69 \"cd /srv/stack && docker compose build claudecodeui\")",
+      "Bash(ssh -i ~/.ssh/id_ed25519 -p 22022 xyster3k@46.62.207.69 \"cd /srv/stack && docker compose up -d claudecodeui\")",
+      "Bash(ssh -i ~/.ssh/id_ed25519 -p 22022 xyster3k@46.62.207.69 \"docker ps --filter name=claudecodeui --format ''{{.Names}} {{.Status}}''\")",
+      "Bash(git checkout f6200e3e95b2f281c08277d5813a0bc7a59a145c)",
+      "Bash(grep -n \"builder.*config\\\\|CLOUDCLI_BUILDER\\\\|builder\\\\.json\" /Users/yuriy/Projects/claudecodeui/patches/*.patch)",
+      "Bash(grep -n \"qaModel\\\\|integratorModel\\\\|QA.*model\\\\|quality.*model\" /Users/yuriy/Projects/claudecodeui/patches/*.patch)",
+      "Bash(xargs ls -la)",
+      "Bash(npm install)",
+      "Bash(npx tsc --noEmit)",
+      "Bash(npx vite build)",
+      "Bash(textutil -convert txt -stdout /Users/yuriy/Downloads/CLAUDE.md)"
     ]
   }
 }

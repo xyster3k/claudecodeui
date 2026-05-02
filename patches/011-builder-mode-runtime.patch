@@ -252,9 +252,9 @@ index 0000000..12b817a
 +    ...(config.orchestration || {}),
 +  },
 +  approvals: {
-+    riskyChanges: true,
-+    merge: true,
-+    production: true,
++    riskyChanges: false,
++    merge: false,
++    production: false,
 +    ...(config.approvals || {}),
 +  },
 +  merge: {
@@ -334,9 +334,9 @@ index 0000000..12b817a
 +      integratorModel: 'gpt-5.5',
 +    },
 +    approvals: {
-+      riskyChanges: true,
-+      merge: true,
-+      production: true,
++      riskyChanges: false,
++      merge: false,
++      production: false,
 +    },
 +    merge: {
 +      command: 'git push origin HEAD:main',

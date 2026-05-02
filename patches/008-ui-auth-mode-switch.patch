@@ -1,8 +1,8 @@
 diff --git a/server/routes/git.js b/server/routes/git.js
-index a439563..af93aeb 100755
+index 2aebdad..9d98616 100755
 --- a/server/routes/git.js
 +++ b/server/routes/git.js
-@@ -1105,6 +1105,8 @@ router.get('/remote-status', async (req, res) => {
+@@ -1110,6 +1110,8 @@ router.get('/remote-status', async (req, res) => {
      
      const [behind, ahead] = countOutput.trim().split('\t').map(Number);
  
@@ -11,7 +11,7 @@ index a439563..af93aeb 100755
      res.json({
        hasRemote: true,
        hasUpstream: true,
-@@ -1113,7 +1115,9 @@ router.get('/remote-status', async (req, res) => {
+@@ -1118,7 +1120,9 @@ router.get('/remote-status', async (req, res) => {
        remoteName,
        ahead: ahead || 0,
        behind: behind || 0,
@@ -22,7 +22,7 @@ index a439563..af93aeb 100755
      });
    } catch (error) {
      console.error('Git remote status error:', error);
-@@ -1121,6 +1125,87 @@ router.get('/remote-status', async (req, res) => {
+@@ -1126,6 +1130,87 @@ router.get('/remote-status', async (req, res) => {
    }
  });
  
@@ -111,10 +111,10 @@ index a439563..af93aeb 100755
  router.post('/fetch', async (req, res) => {
    const { project } = req.body;
 diff --git a/src/components/git-panel/hooks/useGitPanelController.ts b/src/components/git-panel/hooks/useGitPanelController.ts
-index cb34cf1..bb14472 100644
+index 4ef5400..a4b6a32 100644
 --- a/src/components/git-panel/hooks/useGitPanelController.ts
 +++ b/src/components/git-panel/hooks/useGitPanelController.ts
-@@ -370,6 +370,31 @@ export function useGitPanelController({
+@@ -374,6 +374,31 @@ export function useGitPanelController({
      }
    }, [fetchGitStatus, fetchRemoteStatus, selectedProject]);
  
@@ -146,7 +146,7 @@ index cb34cf1..bb14472 100644
    const handlePush = useCallback(async () => {
      if (!selectedProject) {
        return;
-@@ -745,5 +770,6 @@ export function useGitPanelController({
+@@ -749,5 +774,6 @@ export function useGitPanelController({
      commitChanges,
      createInitialCommit,
      openFile,
@@ -184,7 +184,7 @@ index 7abf982..d96bd25 100644
  
  export type GitApiErrorResponse = {
 diff --git a/src/components/git-panel/view/GitPanel.tsx b/src/components/git-panel/view/GitPanel.tsx
-index fc6438b..696447f 100644
+index de9891d..d606dd2 100644
 --- a/src/components/git-panel/view/GitPanel.tsx
 +++ b/src/components/git-panel/view/GitPanel.tsx
 @@ -51,6 +51,7 @@ export default function GitPanel({ selectedProject, isMobile = false, onFileOpen
@@ -195,7 +195,7 @@ index fc6438b..696447f 100644
    } = useGitPanelController({
      selectedProject,
      activeView,
-@@ -108,6 +109,7 @@ export default function GitPanel({ selectedProject, isMobile = false, onFileOpen
+@@ -110,6 +111,7 @@ export default function GitPanel({ selectedProject, isMobile = false, onFileOpen
          onPublish={handlePublish}
          onClearError={clearOperationError}
          onRequestConfirmation={setConfirmAction}
@@ -280,171 +280,6 @@ index 9913cef..7cb14a1 100644
      </>
    );
  }
-diff --git a/src/components/git-panel/view/modals/AuthModeModal.tsx b/src/components/git-panel/view/modals/AuthModeModal.tsx
-new file mode 100644
-index 0000000..d16e81b
---- /dev/null
-+++ b/src/components/git-panel/view/modals/AuthModeModal.tsx
-@@ -0,0 +1,159 @@
-+import { Key, Lock, X } from 'lucide-react';
-+import { useEffect, useState } from 'react';
-+import { authenticatedFetch } from '../../../../utils/api';
-+import type { GitAuthMode } from '../../types/types';
-+
-+type TokenRow = {
-+  id: string;
-+  credential_name: string;
-+  is_active: boolean;
-+  git_name?: string | null;
-+  git_email?: string | null;
-+};
-+
-+type AuthModeModalProps = {
-+  isOpen: boolean;
-+  currentMode: GitAuthMode;
-+  currentTokenName: string | null;
-+  onClose: () => void;
-+  onSave: (mode: GitAuthMode, tokenName?: string | null) => Promise<boolean>;
-+};
-+
-+export default function AuthModeModal({
-+  isOpen,
-+  currentMode,
-+  currentTokenName,
-+  onClose,
-+  onSave,
-+}: AuthModeModalProps) {
-+  const [mode, setMode] = useState<GitAuthMode>(currentMode === 'unknown' ? 'https' : currentMode);
-+  const [tokenName, setTokenName] = useState<string>(currentTokenName ?? '');
-+  const [tokens, setTokens] = useState<TokenRow[]>([]);
-+  const [saving, setSaving] = useState(false);
-+
-+  useEffect(() => {
-+    if (!isOpen) return;
-+    setMode(currentMode === 'unknown' ? 'https' : currentMode);
-+    setTokenName(currentTokenName ?? '');
-+    (async () => {
-+      try {
-+        const r = await authenticatedFetch('/api/settings/credentials?type=github_token');
-+        const body = (await r.json()) as { credentials?: TokenRow[] };
-+        setTokens(body.credentials ?? []);
-+      } catch {
-+        setTokens([]);
-+      }
-+    })();
-+  }, [isOpen, currentMode, currentTokenName]);
-+
-+  if (!isOpen) return null;
-+
-+  const save = async () => {
-+    setSaving(true);
-+    const ok = await onSave(mode, mode === 'https' ? tokenName || null : null);
-+    setSaving(false);
-+    if (ok) onClose();
-+  };
-+
-+  return (
-+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
-+      <div
-+        className="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-xl"
-+        onClick={(e) => e.stopPropagation()}
-+      >
-+        <div className="mb-4 flex items-center justify-between">
-+          <h2 className="text-lg font-semibold">Remote authentication</h2>
-+          <button onClick={onClose} className="rounded p-1 hover:bg-accent" aria-label="Close">
-+            <X className="h-4 w-4" />
-+          </button>
-+        </div>
-+
-+        <p className="mb-4 text-xs text-muted-foreground">
-+          Choose how this repo authenticates to its remote. Changing mode rewrites the origin URL.
-+        </p>
-+
-+        <div className="space-y-2">
-+          <label
-+            className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
-+              mode === 'https' ? 'border-primary bg-primary/5' : 'border-border hover:bg-accent/30'
-+            }`}
-+          >
-+            <input
-+              type="radio"
-+              checked={mode === 'https'}
-+              onChange={() => setMode('https')}
-+              className="mt-0.5"
-+            />
-+            <div className="flex-1">
-+              <div className="flex items-center gap-2 text-sm font-medium">
-+                <Key className="h-4 w-4" /> HTTPS via GitHub token
-+              </div>
-+              <p className="mt-1 text-xs text-muted-foreground">
-+                Uses a Personal Access Token from Settings &rarr; API &amp; Tokens.
-+              </p>
-+              {mode === 'https' && (
-+                <div className="mt-2">
-+                  <label className="block text-xs font-medium text-muted-foreground">
-+                    Token to use for this repo
-+                  </label>
-+                  <select
-+                    value={tokenName}
-+                    onChange={(e) => setTokenName(e.target.value)}
-+                    className="mt-1 w-full rounded border border-border bg-background px-2 py-1 text-sm"
-+                  >
-+                    <option value="">— use the globally active token —</option>
-+                    {tokens.map((t) => (
-+                      <option key={t.id} value={t.credential_name}>
-+                        {t.credential_name}
-+                        {t.git_name ? ` (${t.git_name})` : ''}
-+                        {t.is_active ? '' : ' [inactive]'}
-+                      </option>
-+                    ))}
-+                  </select>
-+                </div>
-+              )}
-+            </div>
-+          </label>
-+
-+          <label
-+            className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
-+              mode === 'ssh' ? 'border-primary bg-primary/5' : 'border-border hover:bg-accent/30'
-+            }`}
-+          >
-+            <input
-+              type="radio"
-+              checked={mode === 'ssh'}
-+              onChange={() => setMode('ssh')}
-+              className="mt-0.5"
-+            />
-+            <div className="flex-1">
-+              <div className="flex items-center gap-2 text-sm font-medium">
-+                <Lock className="h-4 w-4" /> SSH via VPS deploy key
-+              </div>
-+              <p className="mt-1 text-xs text-muted-foreground">
-+                Uses <code>~/.ssh/id_ed25519_deploy</code>. The public key must be added on GitHub
-+                (user-level SSH key, or as a repo deploy key with write enabled).
-+              </p>
-+            </div>
-+          </label>
-+        </div>
-+
-+        <div className="mt-5 flex justify-end gap-2">
-+          <button
-+            onClick={onClose}
-+            className="rounded-lg border border-border px-4 py-2 text-sm hover:bg-accent"
-+          >
-+            Cancel
-+          </button>
-+          <button
-+            onClick={() => void save()}
-+            disabled={saving || mode === 'unknown'}
-+            className="rounded-lg bg-primary px-4 py-2 text-sm text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-+          >
-+            {saving ? 'Saving…' : 'Save'}
-+          </button>
-+        </div>
-+      </div>
-+    </div>
-+  );
-+}
 diff --git a/src/components/git-panel/view/modals/AuthModeModal.tsx b/src/components/git-panel/view/modals/AuthModeModal.tsx
 new file mode 100644
 index 0000000..d16e81b

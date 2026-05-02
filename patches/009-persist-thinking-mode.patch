@@ -1,8 +1,8 @@
 diff --git a/src/components/chat/hooks/useChatComposerState.ts b/src/components/chat/hooks/useChatComposerState.ts
-index 3b16721..40d184f 100644
+index fb7c3fc..08bfb1a 100644
 --- a/src/components/chat/hooks/useChatComposerState.ts
 +++ b/src/components/chat/hooks/useChatComposerState.ts
-@@ -143,7 +143,18 @@ export function useChatComposerState({
+@@ -145,7 +145,18 @@ export function useChatComposerState({
    const [uploadingImages, setUploadingImages] = useState<Map<string, number>>(new Map());
    const [imageErrors, setImageErrors] = useState<Map<string, string>>(new Map());
    const [isTextareaExpanded, setIsTextareaExpanded] = useState(false);
@@ -22,7 +22,7 @@ index 3b16721..40d184f 100644
  
    const textareaRef = useRef<HTMLTextAreaElement>(null);
    const inputHighlightRef = useRef<HTMLDivElement>(null);
-@@ -663,7 +674,6 @@ export function useChatComposerState({
+@@ -667,7 +678,6 @@ export function useChatComposerState({
        setUploadingImages(new Map());
        setImageErrors(new Map());
        setIsTextareaExpanded(false);

@@ -1,17 +1,18 @@
 diff --git a/src/components/sidebar/hooks/useSidebarController.ts b/src/components/sidebar/hooks/useSidebarController.ts
-index b21f13a..346831d 100644
+index d950bc4..909355d 100644
 --- a/src/components/sidebar/hooks/useSidebarController.ts
 +++ b/src/components/sidebar/hooks/useSidebarController.ts
-@@ -298,8 +298,10 @@ export function useSidebarController({
-
-   const toggleProject = useCallback((projectName: string) => {
+@@ -359,10 +359,9 @@ export function useSidebarController({
+   // `projectId` as their identifier after the migration.
+   const toggleProject = useCallback((projectId: string) => {
      setExpandedProjects((prev) => {
 -      const next = new Set<string>();
--      if (!prev.has(projectName)) {
+-      if (!prev.has(projectId)) {
+-        next.add(projectId);
+-      }
 +      const next = new Set(prev);
-+      if (next.has(projectName)) {
-+        next.delete(projectName);
-+      } else {
-         next.add(projectName);
-       }
++      if (next.has(projectId)) next.delete(projectId);
++      else next.add(projectId);
        return next;
+     });
+   }, []);

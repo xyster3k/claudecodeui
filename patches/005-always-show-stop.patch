@@ -3,7 +3,7 @@ index f42e29c..e1e49ba 100644
 --- a/src/components/chat/view/subcomponents/ClaudeStatus.tsx
 +++ b/src/components/chat/view/subcomponents/ClaudeStatus.tsx
 @@ -101,7 +101,7 @@ export default function ClaudeStatus({
-
+ 
          {/* Right Side: Metrics & Actions */}
          <div className="flex items-center gap-2">
 -          {isLoading && status?.can_interrupt !== false && onAbort && (

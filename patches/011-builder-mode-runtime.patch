@@ -1,27 +1,3 @@
-diff --git a/server/index.js b/server/index.js
-index 977ab71..8dfddf9 100755
---- a/server/index.js
-+++ b/server/index.js
-@@ -33,7 +33,7 @@ import { queryClaudeSDK, abortClaudeSDKSession, isClaudeSDKSessionActive, getAct
- import { spawnCursor, abortCursorSession, isCursorSessionActive, getActiveCursorSessions } from './cursor-cli.js';
- import { queryCodex, abortCodexSession, isCodexSessionActive, getActiveCodexSessions } from './openai-codex.js';
- import { spawnGemini, abortGeminiSession, isGeminiSessionActive, getActiveGeminiSessions } from './gemini-cli.js';
--import { resolveBuilderApproval, runBuilderWorkflow } from './builder-mode.js';
-+import { abortBuilderWorkflow, isBuilderWorkflowActive, resolveBuilderApproval, runBuilderWorkflow } from './builder-mode.js';
- import sessionManager from './sessionManager.js';
- import gitRoutes from './routes/git.js';
- import authRoutes from './routes/auth.js';
-@@ -1474,7 +1474,9 @@ function handleChatConnection(ws, request) {
-                 const provider = data.provider || 'claude';
-                 let success;
- 
--                if (provider === 'cursor') {
-+                if (isBuilderWorkflowActive(data.sessionId)) {
-+                    success = await abortBuilderWorkflow(data.sessionId);
-+                } else if (provider === 'cursor') {
-                     success = abortCursorSession(data.sessionId);
-                 } else if (provider === 'codex') {
-                     success = abortCodexSession(data.sessionId);
 diff --git a/server/builder-mode.js b/server/builder-mode.js
 new file mode 100644
 index 0000000..12b817a
@@ -938,3 +914,49 @@ index 0000000..12b817a
 +    activeBuilderRuns.delete(sessionId);
 +  }
 +}
+diff --git a/server/index.js b/server/index.js
+index b1cfc61..c890137 100755
+--- a/server/index.js
++++ b/server/index.js
+@@ -45,7 +45,7 @@ import {
+     isGeminiSessionActive,
+     getActiveGeminiSessions,
+ } from './gemini-cli.js';
+-import { resolveBuilderApproval, runBuilderWorkflow } from './builder-mode.js';
++import { abortBuilderWorkflow, isBuilderWorkflowActive, resolveBuilderApproval, runBuilderWorkflow } from './builder-mode.js';
+ import sessionManager from './sessionManager.js';
+ import {
+     stripAnsiSequences,
+@@ -112,6 +112,8 @@ const wss = createWebSocketServer(server, {
+         getActiveGeminiSessions,
+         runBuilderWorkflow,
+         resolveBuilderApproval,
++        abortBuilderWorkflow,
++        isBuilderWorkflowActive,
+     },
+     shell: {
+         getSessionById: (sessionId) => sessionManager.getSession(sessionId),
+diff --git a/server/modules/websocket/services/chat-websocket.service.ts b/server/modules/websocket/services/chat-websocket.service.ts
+index c1e2aa6..5fe9461 100644
+--- a/server/modules/websocket/services/chat-websocket.service.ts
++++ b/server/modules/websocket/services/chat-websocket.service.ts
+@@ -54,6 +54,8 @@ type ChatWebSocketDependencies = {
+   getActiveGeminiSessions: () => unknown;
+   runBuilderWorkflow: (command: string, options: unknown, writer: WebSocketWriter, provider: string) => Promise<unknown>;
+   resolveBuilderApproval: (requestId: string, decision: { allow: boolean; message?: string }) => boolean;
++  abortBuilderWorkflow: (sessionId: string) => Promise<unknown>;
++  isBuilderWorkflowActive: (sessionId: string) => boolean;
+ };
+ 
+ /**
+@@ -174,7 +176,9 @@ export function handleChatConnection(
+         const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
+         let success = false;
+ 
+-        if (provider === 'cursor') {
++        if (dependencies.isBuilderWorkflowActive(sessionId)) {
++          success = await dependencies.abortBuilderWorkflow(sessionId) as boolean;
++        } else if (provider === 'cursor') {
+           success = dependencies.abortCursorSession(sessionId);
+         } else if (provider === 'codex') {
+           success = dependencies.abortCodexSession(sessionId);

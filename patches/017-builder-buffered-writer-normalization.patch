@@ -1,7 +1,8 @@
 diff --git a/server/builder-mode.js b/server/builder-mode.js
+index 73e9c71..b9394bb 100644
 --- a/server/builder-mode.js
 +++ b/server/builder-mode.js
-@@ -540,27 +540,40 @@
+@@ -527,26 +527,39 @@ class BufferedWriter {
      this.textChunks = [];
      this.errors = [];
      this.onSessionId = onSessionId;
@@ -26,10 +27,8 @@ diff --git a/server/builder-mode.js b/server/builder-mode.js
 +          content: normalizedMessage,
 +        };
 +      }
-     }
- 
--    if (typeof message?.content === 'string' && (message.kind === 'text' || message.kind === 'stream_delta')) {
--      this.textChunks.push(message.content);
++    }
++
 +    this.sessionHistory.push(normalizedMessage);
 +    if (normalizedMessage?.newSessionId) {
 +      this.sessionId = normalizedMessage.newSessionId;
@@ -38,20 +37,21 @@ diff --git a/server/builder-mode.js b/server/builder-mode.js
 +      this.sessionId = normalizedMessage.sessionId;
 +      this.onSessionId?.(this.sessionId, normalizedMessage?.provider || this.provider);
      }
--    if (typeof message?.summary === 'string') {
--      this.textChunks.push(message.summary);
-+
+ 
+-    if (typeof message?.content === 'string' && (message.kind === 'text' || message.kind === 'stream_delta')) {
+-      this.textChunks.push(message.content);
 +    if (typeof normalizedMessage?.content === 'string' && (normalizedMessage.kind === 'text' || normalizedMessage.kind === 'stream_delta')) {
 +      this.textChunks.push(normalizedMessage.content);
      }
--    if (typeof message?.content === 'string' && message.kind === 'error') {
--      this.errors.push(message.content);
+-    if (typeof message?.summary === 'string') {
+-      this.textChunks.push(message.summary);
 +    if (typeof normalizedMessage?.summary === 'string') {
 +      this.textChunks.push(normalizedMessage.summary);
      }
+-    if (typeof message?.content === 'string' && message.kind === 'error') {
+-      this.errors.push(message.content);
 +    if (typeof normalizedMessage?.content === 'string' && normalizedMessage.kind === 'error') {
 +      this.errors.push(normalizedMessage.content);
-+    }
+     }
    }
  
-   setSessionId(sessionId) {

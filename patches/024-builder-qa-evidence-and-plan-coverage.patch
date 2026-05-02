@@ -1,6 +1,8 @@
---- a/server/builder-mode.js	2026-05-01 12:23:51
-+++ b/server/builder-mode.js	2026-05-01 12:22:47
-@@ -549,6 +549,21 @@
+diff --git a/server/builder-mode.js b/server/builder-mode.js
+index f89d935..944d0a0 100644
+--- a/server/builder-mode.js
++++ b/server/builder-mode.js
+@@ -549,6 +549,21 @@ const buildPrdMarkdown = ({
    formatBulletList(tasks.map((task) => `Task ${task.id}: ${task.title}`)),
  ].join('\n');
  
@@ -22,12 +24,10 @@
  const buildPlannerPlanMarkdown = ({
    command,
    projectPath,
-@@ -591,8 +606,71 @@
-     task.dependsOn?.length ? `Depends on: ${task.dependsOn.join(', ')}` : '',
-     task.fileGroups?.length ? `File groups: ${task.fileGroups.join(', ')}` : '',
+@@ -593,6 +608,69 @@ const buildPlannerPlanMarkdown = ({
    ].filter(Boolean).join('\n\n')).join('\n\n'),
-+].join('\n');
-+
+ ].join('\n');
+ 
 +const buildPlanCoverageReviewMarkdown = ({
 +  command,
 +  projectPath,
@@ -56,8 +56,8 @@
 +  '',
 +  '### Out-Of-Scope Risks',
 +  formatBulletList(outOfScopeRisks),
- ].join('\n');
- 
++].join('\n');
++
 +const buildQaBundleMarkdown = ({
 +  command,
 +  projectPath,
@@ -94,7 +94,7 @@
  const ensureDirectories = async (projectPath) => {
    await fs.mkdir(path.join(projectPath, TASKMASTER_DIR, 'docs'), { recursive: true });
    await fs.mkdir(path.join(projectPath, TASKMASTER_DIR, 'tasks'), { recursive: true });
-@@ -605,11 +683,16 @@
+@@ -605,11 +683,16 @@ const writeJsonFile = async (filePath, value) => {
    await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
  };
  
@@ -112,7 +112,7 @@
    const tasksPath = path.join(projectPath, TASKMASTER_DIR, 'tasks', 'tasks.json');
    const runPath = path.join(projectPath, BUILDER_ARTIFACT_DIR, `${sanitizeFileName(sessionId)}.json`);
    const latestPath = path.join(projectPath, BUILDER_ARTIFACT_DIR, 'latest-run.json');
-@@ -656,11 +739,16 @@
+@@ -656,11 +739,16 @@ const persistRunArtifacts = async (projectPath, sessionId, prdMarkdown, planMark
    };
  
    await fs.mkdir(path.dirname(configExamplePath), { recursive: true });
@@ -131,7 +131,7 @@
    try {
      await fs.access(logPath);
    } catch {
-@@ -674,8 +762,13 @@
+@@ -674,8 +762,13 @@ const persistRunArtifacts = async (projectPath, sessionId, prdMarkdown, planMark
    }
  
    return {
@@ -145,7 +145,7 @@
      tasksPath,
      runPath,
      latestPath,
-@@ -702,13 +795,20 @@
+@@ -702,13 +795,20 @@ const createBuilderRunRecord = ({
      createdAt: timestamp,
      updatedAt: timestamp,
      config: config || {},
@@ -166,7 +166,7 @@
      childSessions: [],
      tasks: [],
      metrics: summarizeBuilderTaskMetrics([]),
-@@ -777,6 +877,12 @@
+@@ -777,6 +877,12 @@ const setBuilderRunPhase = async (runState, phase, fields = {}) => {
    if (Object.prototype.hasOwnProperty.call(fields, 'plannerExecutionPlan')) {
      runState.record.plannerExecutionPlan = readString(fields.plannerExecutionPlan) || '';
    }
@@ -179,13 +179,10 @@
    await persistBuilderRunState(runState);
  };
  
-@@ -1629,6 +1735,78 @@
-     };
-   } catch {
-     return fallbackPlan(command, projectPath, maxWorkers, parallelWorkers);
-+  }
-+};
-+
+@@ -1632,6 +1738,78 @@ const parsePlannerOutput = ({ text, command, projectPath, maxWorkers, parallelWo
+   }
+ };
+ 
 +const buildPlanCoveragePrompt = ({
 +  command,
 +  prdMarkdown,
@@ -255,10 +252,13 @@
 +      ambiguousPoints: [],
 +      outOfScopeRisks: [],
 +    };
-   }
- };
- 
-@@ -1807,22 +1985,37 @@
++  }
++};
++
+ export async function runBuilderWorkflow(command, options = {}, writer, provider = 'claude') {
+   const sessionId = `builder-${randomUUID()}`;
+   const projectPath = options.projectPath || options.cwd || process.cwd();
+@@ -1807,22 +1985,37 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
      });
      let plannerSessionId = plannerWriter.getSessionId();
      const workerTasks = plannerResult.tasks;
@@ -297,7 +297,7 @@
        tasksPath,
        logPath,
        plannerSessionId,
-@@ -1867,11 +2060,106 @@
+@@ -1867,11 +2060,106 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
      await appendBuilderRunEvent(runState, {
        kind: 'planner_prd_persisted',
        summary: 'Planner PRD, plan, and task artifacts were persisted',
@@ -404,7 +404,7 @@
      if (builderConfig.approvals.riskyChanges && RISKY_CHANGE_PATTERN.test(command)) {
        await setBuilderRunPhase(runState, BUILDER_RUN_PHASES.approvals, {
          lastEvent: 'Waiting for risky scope approval',
-@@ -2519,6 +2807,30 @@
+@@ -2519,6 +2807,30 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
      }
  
      if (builderConfig.qa.enabled && qaProvider && qaModel) {
@@ -435,7 +435,7 @@
        await setBuilderRunPhase(runState, BUILDER_RUN_PHASES.qa, {
          lastEvent: `Cross-provider QA started with ${qaProvider}`,
        });
-@@ -2537,20 +2849,36 @@
+@@ -2537,20 +2849,36 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
            `Primary build provider: ${provider}`,
            `Your QA provider: ${qaProvider}`,
            '',

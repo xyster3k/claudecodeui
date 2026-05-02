@@ -1,16 +1,16 @@
 diff --git a/src/components/app/AppContent.tsx b/src/components/app/AppContent.tsx
-index 63c11df..b189e12 100644
+index 432447e..55fd9b5 100644
 --- a/src/components/app/AppContent.tsx
 +++ b/src/components/app/AppContent.tsx
-@@ -7,6 +7,7 @@ import { useWebSocket } from '../../contexts/WebSocketContext';
+@@ -10,6 +10,7 @@ import { PaletteOpsProvider, usePaletteOpsRegister } from '../../contexts/Palett
  import { useDeviceSettings } from '../../hooks/useDeviceSettings';
  import { useSessionProtection } from '../../hooks/useSessionProtection';
  import { useProjectsState } from '../../hooks/useProjectsState';
 +import type { LLMProvider } from '../../types/app';
  
  export default function AppContent() {
-   const navigate = useNavigate();
-@@ -142,11 +143,23 @@ export default function AppContent() {
+   return (
+@@ -137,11 +138,23 @@ function AppContentInner() {
      return () => vv.removeEventListener('resize', update);
    }, []);
  
@@ -35,7 +35,7 @@ index 63c11df..b189e12 100644
          </div>
        ) : (
          <div
-@@ -172,7 +185,11 @@ export default function AppContent() {
+@@ -167,7 +180,11 @@ function AppContentInner() {
              onClick={(event) => event.stopPropagation()}
              onTouchStart={(event) => event.stopPropagation()}
            >
@@ -49,16 +49,19 @@ index 63c11df..b189e12 100644
          </div>
        )}
 diff --git a/src/components/sidebar/types/types.ts b/src/components/sidebar/types/types.ts
-index 9154717..c69c110 100644
+index 6db2512..bd62d1b 100644
 --- a/src/components/sidebar/types/types.ts
 +++ b/src/components/sidebar/types/types.ts
-@@ -28,10 +28,12 @@ export type SidebarProps = {
+@@ -27,6 +27,7 @@ export type SidebarProps = {
    onProjectSelect: (project: Project) => void;
    onSessionSelect: (session: ProjectSession) => void;
    onNewSession: (project: Project) => void;
 +  onAbortSession: (sessionId: string, provider: LLMProvider) => void;
    onSessionDelete?: (sessionId: string) => void;
-   onProjectDelete?: (projectName: string) => void;
+   onLoadMoreSessions?: (projectId: string) => Promise<void> | void;
+   // `projectId` is the DB identifier; the sidebar hands it back to the parent
+@@ -34,6 +35,7 @@ export type SidebarProps = {
+   onProjectDelete?: (projectId: string) => void;
    isLoading: boolean;
    loadingProgress: LoadingProgress | null;
 +  processingSessions: Set<string>;
@@ -66,15 +69,16 @@ index 9154717..c69c110 100644
    onShowSettings: () => void;
    showSettings: boolean;
 diff --git a/src/components/sidebar/view/Sidebar.tsx b/src/components/sidebar/view/Sidebar.tsx
-index 0d6c906..727650b 100644
+index 97484b0..f9a2d91 100644
 --- a/src/components/sidebar/view/Sidebar.tsx
 +++ b/src/components/sidebar/view/Sidebar.tsx
-@@ -25,10 +25,12 @@ function Sidebar({
+@@ -28,11 +28,13 @@ function Sidebar({
    onProjectSelect,
    onSessionSelect,
    onNewSession,
 +  onAbortSession,
    onSessionDelete,
+   onLoadMoreSessions,
    onProjectDelete,
    isLoading,
    loadingProgress,
@@ -83,40 +87,40 @@ index 0d6c906..727650b 100644
    onShowSettings,
    showSettings,
 @@ -145,6 +147,7 @@ function Sidebar({
-     loadingSessions,
+     editingName,
      initialSessionsLoaded,
      currentTime,
 +    processingSessions,
      editingSession,
      editingSessionName,
      deletingProjects,
-@@ -163,6 +166,7 @@ function Sidebar({
+@@ -164,6 +167,7 @@ function Sidebar({
      },
      onDeleteProject: requestProjectDelete,
      onSessionSelect: handleSessionClick,
 +    onAbortSession,
      onDeleteSession: showDeleteSessionConfirmation,
-     onLoadMoreSessions: (project) => {
-       void loadMoreSessions(project);
+     onLoadMoreSessions: loadMoreSessionsForProject,
+     onNewSession,
 diff --git a/src/components/sidebar/view/subcomponents/SidebarProjectItem.tsx b/src/components/sidebar/view/subcomponents/SidebarProjectItem.tsx
-index 69f4d3d..806d269 100644
+index 8756464..6ca30de 100644
 --- a/src/components/sidebar/view/subcomponents/SidebarProjectItem.tsx
 +++ b/src/components/sidebar/view/subcomponents/SidebarProjectItem.tsx
 @@ -1,4 +1,4 @@
 -import { Check, ChevronDown, ChevronRight, Edit3, Folder, FolderOpen, Star, Trash2, X } from 'lucide-react';
 +import { Check, ChevronDown, ChevronRight, Edit3, Folder, FolderOpen, Square, Star, Trash2, X } from 'lucide-react';
  import type { TFunction } from 'i18next';
+ 
  import { Button } from '../../../../shared/view/ui';
- import { cn } from '../../../../lib/utils';
-@@ -21,6 +21,7 @@ type SidebarProjectItemProps = {
+@@ -23,6 +23,7 @@ type SidebarProjectItemProps = {
    initialSessionsLoaded: boolean;
-   isLoadingSessions: boolean;
+   isLoadingMoreSessions: boolean;
    currentTime: Date;
 +  processingSessions: Set<string>;
    editingSession: string | null;
    editingSessionName: string;
    tasksEnabled: boolean;
-@@ -34,6 +35,7 @@ type SidebarProjectItemProps = {
+@@ -36,6 +37,7 @@ type SidebarProjectItemProps = {
    onSaveProjectName: (projectName: string) => void;
    onDeleteProject: (project: Project) => void;
    onSessionSelect: (session: SessionWithProvider, projectName: string) => void;
@@ -124,15 +128,15 @@ index 69f4d3d..806d269 100644
    onDeleteSession: (
      projectName: string,
      sessionId: string,
-@@ -71,6 +73,7 @@ export default function SidebarProjectItem({
+@@ -69,6 +71,7 @@ export default function SidebarProjectItem({
    initialSessionsLoaded,
-   isLoadingSessions,
+   isLoadingMoreSessions,
    currentTime,
 +  processingSessions,
    editingSession,
    editingSessionName,
    tasksEnabled,
-@@ -84,6 +87,7 @@ export default function SidebarProjectItem({
+@@ -82,6 +85,7 @@ export default function SidebarProjectItem({
    onSaveProjectName,
    onDeleteProject,
    onSessionSelect,
@@ -141,14 +145,14 @@ index 69f4d3d..806d269 100644
    onLoadMoreSessions,
    onNewSession,
 @@ -99,6 +103,8 @@ export default function SidebarProjectItem({
-   const sessionCountDisplay = getSessionCountDisplay(sessions, hasMoreSessions);
-   const sessionCountLabel = `${sessionCountDisplay} session${sessions.length === 1 ? '' : 's'}`;
+   const sessionCountDisplay = getSessionCountDisplay(project, sessions);
+   const sessionCountLabel = `${sessionCountDisplay} session${totalSessionCount === 1 ? '' : 's'}`;
    const taskStatus = getTaskIndicatorStatus(project, mcpServerStatus);
 +  const processingProjectSessions = sessions.filter((session) => processingSessions.has(session.id));
 +  const runControlTarget = processingProjectSessions[0] || null;
  
-   const toggleProject = () => onToggleProject(project.name);
-   const toggleStarProject = () => onToggleStarProject(project.name);
+   const toggleProject = () => onToggleProject(project.projectId);
+   const toggleStarProject = () => onToggleStarProject(project.projectId);
 @@ -212,6 +218,18 @@ export default function SidebarProjectItem({
                    </>
                  ) : (
@@ -187,15 +191,15 @@ index 69f4d3d..806d269 100644
                  <div
                    className={cn(
                      'w-6 h-6 opacity-0 group-hover:opacity-100 transition-all duration-200 flex items-center justify-center rounded cursor-pointer touch:opacity-100',
-@@ -411,6 +441,7 @@ export default function SidebarProjectItem({
-         initialSessionsLoaded={initialSessionsLoaded}
-         isLoadingSessions={isLoadingSessions}
+@@ -412,6 +442,7 @@ export default function SidebarProjectItem({
+         hasMoreSessions={Boolean(project.sessionMeta?.hasMore)}
+         isLoadingMoreSessions={isLoadingMoreSessions}
          currentTime={currentTime}
 +        processingSessions={processingSessions}
          editingSession={editingSession}
          editingSessionName={editingSessionName}
          onEditingSessionNameChange={onEditingSessionNameChange}
-@@ -419,6 +450,7 @@ export default function SidebarProjectItem({
+@@ -420,6 +451,7 @@ export default function SidebarProjectItem({
          onSaveEditingSession={onSaveEditingSession}
          onProjectSelect={onProjectSelect}
          onSessionSelect={onSessionSelect}
@@ -204,18 +208,18 @@ index 69f4d3d..806d269 100644
          onLoadMoreSessions={onLoadMoreSessions}
          onNewSession={onNewSession}
 diff --git a/src/components/sidebar/view/subcomponents/SidebarProjectList.tsx b/src/components/sidebar/view/subcomponents/SidebarProjectList.tsx
-index a755b1d..ed15a86 100644
+index fc9fac6..58103cf 100644
 --- a/src/components/sidebar/view/subcomponents/SidebarProjectList.tsx
 +++ b/src/components/sidebar/view/subcomponents/SidebarProjectList.tsx
-@@ -22,6 +22,7 @@ export type SidebarProjectListProps = {
-   loadingSessions: LoadingSessionsByProject;
+@@ -19,6 +19,7 @@ export type SidebarProjectListProps = {
+   editingName: string;
    initialSessionsLoaded: Set<string>;
    currentTime: Date;
 +  processingSessions: Set<string>;
    editingSession: string | null;
    editingSessionName: string;
    deletingProjects: Set<string>;
-@@ -38,6 +39,7 @@ export type SidebarProjectListProps = {
+@@ -37,6 +38,7 @@ export type SidebarProjectListProps = {
    onSaveProjectName: (projectName: string) => void;
    onDeleteProject: (project: Project) => void;
    onSessionSelect: (session: SessionWithProvider, projectName: string) => void;
@@ -223,25 +227,25 @@ index a755b1d..ed15a86 100644
    onDeleteSession: (
      projectName: string,
      sessionId: string,
-@@ -66,6 +68,7 @@ export default function SidebarProjectList({
-   loadingSessions,
+@@ -63,6 +65,7 @@ export default function SidebarProjectList({
+   editingName,
    initialSessionsLoaded,
    currentTime,
 +  processingSessions,
    editingSession,
    editingSessionName,
    deletingProjects,
-@@ -82,6 +85,7 @@ export default function SidebarProjectList({
+@@ -81,6 +84,7 @@ export default function SidebarProjectList({
    onSaveProjectName,
    onDeleteProject,
    onSessionSelect,
 +  onAbortSession,
    onDeleteSession,
-   onLoadMoreSessions,
    onNewSession,
+   onEditingSessionNameChange,
 @@ -131,6 +135,7 @@ export default function SidebarProjectList({
-               initialSessionsLoaded={initialSessionsLoaded.has(project.name)}
-               isLoadingSessions={Boolean(loadingSessions[project.name])}
+               initialSessionsLoaded={initialSessionsLoaded.has(project.projectId)}
+               isLoadingMoreSessions={loadingMoreProjects.has(project.projectId)}
                currentTime={currentTime}
 +              processingSessions={processingSessions}
                editingSession={editingSession}
@@ -256,18 +260,18 @@ index a755b1d..ed15a86 100644
                onLoadMoreSessions={onLoadMoreSessions}
                onNewSession={onNewSession}
 diff --git a/src/components/sidebar/view/subcomponents/SidebarProjectSessions.tsx b/src/components/sidebar/view/subcomponents/SidebarProjectSessions.tsx
-index 3091bf9..5ca0269 100644
+index 758441b..f676447 100644
 --- a/src/components/sidebar/view/subcomponents/SidebarProjectSessions.tsx
 +++ b/src/components/sidebar/view/subcomponents/SidebarProjectSessions.tsx
-@@ -13,6 +13,7 @@ type SidebarProjectSessionsProps = {
-   initialSessionsLoaded: boolean;
-   isLoadingSessions: boolean;
+@@ -16,6 +16,7 @@ type SidebarProjectSessionsProps = {
+   hasMoreSessions: boolean;
+   isLoadingMoreSessions: boolean;
    currentTime: Date;
 +  processingSessions: Set<string>;
    editingSession: string | null;
    editingSessionName: string;
    onEditingSessionNameChange: (value: string) => void;
-@@ -21,6 +22,7 @@ type SidebarProjectSessionsProps = {
+@@ -24,6 +25,7 @@ type SidebarProjectSessionsProps = {
    onSaveEditingSession: (projectName: string, sessionId: string, summary: string, provider: LLMProvider) => void;
    onProjectSelect: (project: Project) => void;
    onSessionSelect: (session: SessionWithProvider, projectName: string) => void;
@@ -275,15 +279,15 @@ index 3091bf9..5ca0269 100644
    onDeleteSession: (
      projectName: string,
      sessionId: string,
-@@ -58,6 +60,7 @@ export default function SidebarProjectSessions({
-   initialSessionsLoaded,
-   isLoadingSessions,
+@@ -62,6 +64,7 @@ export default function SidebarProjectSessions({
+   hasMoreSessions,
+   isLoadingMoreSessions,
    currentTime,
 +  processingSessions,
    editingSession,
    editingSessionName,
    onEditingSessionNameChange,
-@@ -66,6 +69,7 @@ export default function SidebarProjectSessions({
+@@ -70,6 +73,7 @@ export default function SidebarProjectSessions({
    onSaveEditingSession,
    onProjectSelect,
    onSessionSelect,
@@ -291,32 +295,32 @@ index 3091bf9..5ca0269 100644
    onDeleteSession,
    onLoadMoreSessions,
    onNewSession,
-@@ -117,6 +121,7 @@ export default function SidebarProjectSessions({
-             session={session}
-             selectedSession={selectedSession}
-             currentTime={currentTime}
-+            isProcessing={processingSessions.has(session.id)}
-             editingSession={editingSession}
-             editingSessionName={editingSessionName}
-             onEditingSessionNameChange={onEditingSessionNameChange}
-@@ -125,6 +130,7 @@ export default function SidebarProjectSessions({
-             onSaveEditingSession={onSaveEditingSession}
-             onProjectSelect={onProjectSelect}
-             onSessionSelect={onSessionSelect}
-+            onAbortSession={onAbortSession}
-             onDeleteSession={onDeleteSession}
-             t={t}
-           />
+@@ -121,6 +125,7 @@ export default function SidebarProjectSessions({
+               session={session}
+               selectedSession={selectedSession}
+               currentTime={currentTime}
++              isProcessing={processingSessions.has(session.id)}
+               editingSession={editingSession}
+               editingSessionName={editingSessionName}
+               onEditingSessionNameChange={onEditingSessionNameChange}
+@@ -129,6 +134,7 @@ export default function SidebarProjectSessions({
+               onSaveEditingSession={onSaveEditingSession}
+               onProjectSelect={onProjectSelect}
+               onSessionSelect={onSessionSelect}
++              onAbortSession={onAbortSession}
+               onDeleteSession={onDeleteSession}
+               t={t}
+             />
 diff --git a/src/components/sidebar/view/subcomponents/SidebarSessionItem.tsx b/src/components/sidebar/view/subcomponents/SidebarSessionItem.tsx
-index 507478a..13b51c4 100644
+index 7da02cb..0ae8023 100644
 --- a/src/components/sidebar/view/subcomponents/SidebarSessionItem.tsx
 +++ b/src/components/sidebar/view/subcomponents/SidebarSessionItem.tsx
 @@ -1,4 +1,4 @@
--import { Check, Clock, Edit2, Trash2, X } from 'lucide-react';
-+import { Check, Clock, Edit2, Square, Trash2, X } from 'lucide-react';
+-import { Check, Edit2, Trash2, X } from 'lucide-react';
++import { Check, Edit2, Square, Trash2, X } from 'lucide-react';
  import type { TFunction } from 'i18next';
+ 
  import { Badge, Button } from '../../../../shared/view/ui';
- import { cn } from '../../../../lib/utils';
 @@ -13,6 +13,7 @@ type SidebarSessionItemProps = {
    session: SessionWithProvider;
    selectedSession: ProjectSession | null;
@@ -333,7 +337,7 @@ index 507478a..13b51c4 100644
    onDeleteSession: (
      projectName: string,
      sessionId: string,
-@@ -35,6 +37,7 @@ export default function SidebarSessionItem({
+@@ -63,6 +65,7 @@ export default function SidebarSessionItem({
    session,
    selectedSession,
    currentTime,
@@ -341,7 +345,7 @@ index 507478a..13b51c4 100644
    editingSession,
    editingSessionName,
    onEditingSessionNameChange,
-@@ -43,6 +46,7 @@ export default function SidebarSessionItem({
+@@ -71,6 +74,7 @@ export default function SidebarSessionItem({
    onSaveEditingSession,
    onProjectSelect,
    onSessionSelect,
@@ -349,7 +353,7 @@ index 507478a..13b51c4 100644
    onDeleteSession,
    t,
  }: SidebarSessionItemProps) {
-@@ -75,7 +79,9 @@ export default function SidebarSessionItem({
+@@ -106,7 +110,9 @@ export default function SidebarSessionItem({
            className={cn(
              'p-2 mx-3 my-0.5 rounded-md bg-card border active:scale-[0.98] transition-all duration-150 relative',
              isSelected ? 'bg-primary/5 border-primary/20' : '',
@@ -360,7 +364,7 @@ index 507478a..13b51c4 100644
                ? 'border-green-500/30 bg-green-50/5 dark:bg-green-900/5'
                : 'border-border/30',
            )}
-@@ -109,6 +115,19 @@ export default function SidebarSessionItem({
+@@ -138,6 +144,19 @@ export default function SidebarSessionItem({
                </div>
              </div>
  
@@ -380,7 +384,7 @@ index 507478a..13b51c4 100644
              {!sessionView.isCursorSession && (
                <button
                  className="ml-1 flex h-5 w-5 items-center justify-center rounded-md bg-red-50 opacity-70 transition-transform active:scale-95 dark:bg-red-900/20"
-@@ -158,7 +177,12 @@ export default function SidebarSessionItem({
+@@ -180,7 +199,12 @@ export default function SidebarSessionItem({
            </div>
          </Button>
  
@@ -394,7 +398,7 @@ index 507478a..13b51c4 100644
              {editingSession === session.id ? (
                <>
                  <input
-@@ -200,6 +224,18 @@ export default function SidebarSessionItem({
+@@ -222,6 +246,18 @@ export default function SidebarSessionItem({
                </>
              ) : (
                <>
@@ -414,7 +418,7 @@ index 507478a..13b51c4 100644
                    className="flex h-6 w-6 items-center justify-center rounded bg-gray-50 hover:bg-gray-100 dark:bg-gray-900/20 dark:hover:bg-gray-900/40"
                    onClick={(event) => {
 diff --git a/src/i18n/locales/en/sidebar.json b/src/i18n/locales/en/sidebar.json
-index 7b3452c..ea02d19 100644
+index 43498ce..c0a2ea6 100644
 --- a/src/i18n/locales/en/sidebar.json
 +++ b/src/i18n/locales/en/sidebar.json
 @@ -44,6 +44,8 @@

@@ -1,7 +1,8 @@
 diff --git a/src/components/chat/hooks/useChatComposerState.ts b/src/components/chat/hooks/useChatComposerState.ts
+index 9b64d57..cbf592f 100644
 --- a/src/components/chat/hooks/useChatComposerState.ts
 +++ b/src/components/chat/hooks/useChatComposerState.ts
-@@ -575,9 +575,7 @@ export function useChatComposerState({
+@@ -583,9 +583,7 @@ export function useChatComposerState({
          pendingViewSessionRef.current = { sessionId: null, startedAt: Date.now() };
        }
        onSessionActive?.(sessionToActivate);
@@ -13,9 +14,10 @@ diff --git a/src/components/chat/hooks/useChatComposerState.ts b/src/components/
        const getToolsSettings = () => {
          try {
 diff --git a/src/components/chat/hooks/useChatRealtimeHandlers.ts b/src/components/chat/hooks/useChatRealtimeHandlers.ts
+index d20aeb9..694f938 100644
 --- a/src/components/chat/hooks/useChatRealtimeHandlers.ts
 +++ b/src/components/chat/hooks/useChatRealtimeHandlers.ts
-@@ -239,12 +239,14 @@ export function useChatRealtimeHandlers({
+@@ -240,6 +240,7 @@ export function useChatRealtimeHandlers({
            }
            setCurrentSessionId(newSessionId);
            onReplaceTemporarySession?.(newSessionId);
@@ -23,7 +25,7 @@ diff --git a/src/components/chat/hooks/useChatRealtimeHandlers.ts b/src/componen
          } else if (!currentSessionId || currentSessionId.startsWith('new-session-')) {
            sessionStorage.setItem('pendingSessionId', newSessionId);
            if (pendingViewSessionRef.current && !pendingViewSessionRef.current.sessionId) {
-             pendingViewSessionRef.current.sessionId = newSessionId;
+@@ -247,6 +248,7 @@ export function useChatRealtimeHandlers({
            }
            setCurrentSessionId(newSessionId);
            onReplaceTemporarySession?.(newSessionId);
@@ -32,6 +34,7 @@ diff --git a/src/components/chat/hooks/useChatRealtimeHandlers.ts b/src/componen
              prev.map((r) => (r.sessionId ? r : { ...r, sessionId: newSessionId })),
            );
 diff --git a/src/hooks/useSessionProtection.ts b/src/hooks/useSessionProtection.ts
+index 0c3d1ba..2222885 100644
 --- a/src/hooks/useSessionProtection.ts
 +++ b/src/hooks/useSessionProtection.ts
 @@ -59,6 +59,22 @@ export function useSessionProtection() {

@@ -1,21 +1,17 @@
-diff --git a/server/index.js b/server/index.js
-index 62d8513..4a4e700 100755
---- a/server/index.js
-+++ b/server/index.js
-@@ -1408,6 +1408,16 @@ function handleChatConnection(ws, request) {
-                 console.log('📁 Project:', data.options?.projectPath || 'Unknown');
-                 console.log('🔄 Session:', data.options?.sessionId ? 'Resume' : 'New');
+diff --git a/server/modules/websocket/services/chat-websocket.service.ts b/server/modules/websocket/services/chat-websocket.service.ts
+index 95fabe5..5c8d5b8 100644
+--- a/server/modules/websocket/services/chat-websocket.service.ts
++++ b/server/modules/websocket/services/chat-websocket.service.ts
+@@ -115,6 +115,12 @@ export function handleChatConnection(
+       }
  
-+                // Guard: if this session is already running (e.g. second device
-+                // or rapid reconnect), just attach this WS for output — don't
-+                // spawn a duplicate SDK query.
-+                const reqSessionId = data.options?.sessionId;
-+                if (reqSessionId && isClaudeSDKSessionActive(reqSessionId)) {
-+                    console.log(`[DEDUP] Session ${reqSessionId} already active, skipping duplicate query`);
-+                    reconnectSessionWriter(reqSessionId, ws);
-+                    return;
-+                }
-+
-                 // Use Claude Agents SDK
-                 await queryClaudeSDK(data.command, data.options, writer);
-             } else if (data.type === 'cursor-command') {
+       if (messageType === 'claude-command') {
++        const sessionId = (data.options as Record<string, unknown>)?.sessionId as string | undefined;
++        if (sessionId && dependencies.isClaudeSDKSessionActive(sessionId)) {
++          if (dependencies.reconnectSessionWriter(sessionId, ws)) {
++            return;
++          }
++        }
+         await dependencies.queryClaudeSDK(data.command ?? '', data.options, writer);
+         return;
+       }

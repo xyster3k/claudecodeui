@@ -1,8 +1,8 @@
 diff --git a/src/components/chat/view/subcomponents/ChatComposer.tsx b/src/components/chat/view/subcomponents/ChatComposer.tsx
-index 9038740..ef2d1bb 100644
+index 2701e7b..1c8ff2d 100644
 --- a/src/components/chat/view/subcomponents/ChatComposer.tsx
 +++ b/src/components/chat/view/subcomponents/ChatComposer.tsx
-@@ -394,7 +394,7 @@ export default function ChatComposer({
+@@ -399,7 +399,7 @@ export default function ChatComposer({
                {sendByCtrlEnter ? t('input.hintText.ctrlEnter') : t('input.hintText.enter')}
              </div>
              <PromptInputSubmit

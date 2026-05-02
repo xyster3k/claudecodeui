@@ -1,7 +1,7 @@
 # Builds a custom CloudCLI image from upstream source + local patches.
 # Pinning to a known-good upstream commit for reproducibility — bump when validating new upstream releases.
 
-ARG UPSTREAM_COMMIT=f6200e3e95b2f281c08277d5813a0bc7a59a145c  # v1.30.0
+ARG UPSTREAM_COMMIT=392c73b6933600ea8a589c5d4eff5f7b830f99c5  # v1.31.5
 
 FROM node:22-bookworm-slim AS builder
 ARG UPSTREAM_COMMIT

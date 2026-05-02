@@ -1,7 +1,7 @@
 diff --git a/server/routes/git.js b/server/routes/git.js
 --- a/server/routes/git.js
 +++ b/server/routes/git.js
-@@ -214,6 +214,19 @@ async function getRepositoryRootPath(projectPath) {
+@@ -214,6 +214,32 @@ async function getRepositoryRootPath(projectPath) {
    return stdout.trim();
  }
 
@@ -38,7 +38,7 @@ diff --git a/server/routes/git.js b/server/routes/git.js
  function normalizeRepositoryRelativeFilePath(filePath) {
    return String(filePath)
      .replace(/\\/g, '/')
-@@ -232,7 +245,7 @@ function parseStatusFilePaths(statusOutput) {
+@@ -232,7 +258,7 @@ function parseStatusFilePaths(statusOutput) {
      .map((line) => {
        const statusPath = line.substring(3);
        const renamedFilePath = statusPath.split(' -> ')[1];
@@ -47,7 +47,7 @@ diff --git a/server/routes/git.js b/server/routes/git.js
      })
      .filter(Boolean);
  }
-@@ -323,7 +336,7 @@ router.get('/status', async (req, res) => {
+@@ -323,7 +349,7 @@ router.get('/status', async (req, res) => {
        if (!line.trim()) return;
 
        const status = line.substring(0, 2);

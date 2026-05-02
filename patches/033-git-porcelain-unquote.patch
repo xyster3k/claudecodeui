@@ -1,0 +1,42 @@
+diff --git a/server/routes/git.js b/server/routes/git.js
+index 9d98616..b3c4e01 100755
+--- a/server/routes/git.js
++++ b/server/routes/git.js
+@@ -216,6 +216,19 @@ async function getRepositoryRootPath(projectPath) {
+   return rootPath;
+ }
+
++/**
++ * Git's --porcelain output wraps filenames containing spaces or special chars
++ * in double-quotes and may use C-style escapes (e.g. \\ for backslash,
++ * \" for double-quote, \nnn for octal bytes).  Strip the surrounding quotes
++ * and unescape common sequences so the rest of the code sees the real path.
++ */
++function unquoteGitPath(p) {
++  if (p.length >= 2 && p.startsWith('"') && p.endsWith('"')) {
++    return p.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\').replace(/\\([0-7]{3})/g, (_, oct) => String.fromCharCode(parseInt(oct, 8)));
++  }
++  return p;
++}
++
+ function normalizeRepositoryRelativeFilePath(filePath) {
+   return String(filePath)
+     .replace(/\\/g, '/')
+@@ -231,7 +244,7 @@ function parseStatusFilePaths(statusOutput) {
+     .map((line) => {
+       const statusPath = line.substring(3);
+       const renamedFilePath = statusPath.split(' -> ')[1];
+-      return normalizeRepositoryRelativeFilePath(renamedFilePath || statusPath);
++      return normalizeRepositoryRelativeFilePath(unquoteGitPath(renamedFilePath || statusPath));
+     })
+     .filter(Boolean);
+ }
+@@ -321,7 +334,7 @@ router.get('/status', async (req, res) => {
+       if (!line.trim()) return;
+
+       const status = line.substring(0, 2);
+-      const file = line.substring(3);
++      const file = unquoteGitPath(line.substring(3));
+
+       if (status === 'M ' || status === ' M' || status === 'MM') {
+         modified.push(file);

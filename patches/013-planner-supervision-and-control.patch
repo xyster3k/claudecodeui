@@ -768,13 +768,13 @@ index c890137..3dbd958 100755
  import sessionManager from './sessionManager.js';
  import {
      stripAnsiSequences,
-@@ -112,6 +112,7 @@ const wss = createWebSocketServer(server, {
+@@ -112,6 +112,6 @@ const wss = createWebSocketServer(server, {
          getActiveGeminiSessions,
          runBuilderWorkflow,
          resolveBuilderApproval,
 +    resolveBuilderAbortTarget,
          abortBuilderWorkflow,
-         isBuilderWorkflowActive,
+-        isBuilderWorkflowActive,
      },
 diff --git a/server/modules/websocket/services/chat-websocket.service.ts b/server/modules/websocket/services/chat-websocket.service.ts
 index 5fe9461..59e3d0a 100644

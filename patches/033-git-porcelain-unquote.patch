@@ -1,10 +1,11 @@
 diff --git a/server/routes/git.js b/server/routes/git.js
+index 9d98616..22040a2 100755
 --- a/server/routes/git.js
 +++ b/server/routes/git.js
-@@ -214,6 +214,32 @@ async function getRepositoryRootPath(projectPath) {
+@@ -216,6 +216,36 @@ async function getRepositoryRootPath(projectPath) {
    return stdout.trim();
  }
-
+ 
 +/**
 + * Git's --porcelain output wraps filenames containing spaces or special chars
 + * in double-quotes and may use C-style escapes (e.g. \\ for backslash,
@@ -38,7 +39,7 @@ diff --git a/server/routes/git.js b/server/routes/git.js
  function normalizeRepositoryRelativeFilePath(filePath) {
    return String(filePath)
      .replace(/\\/g, '/')
-@@ -232,7 +258,7 @@ function parseStatusFilePaths(statusOutput) {
+@@ -232,7 +262,7 @@ function parseStatusFilePaths(statusOutput) {
      .map((line) => {
        const statusPath = line.substring(3);
        const renamedFilePath = statusPath.split(' -> ')[1];
@@ -47,12 +48,12 @@ diff --git a/server/routes/git.js b/server/routes/git.js
      })
      .filter(Boolean);
  }
-@@ -323,7 +349,7 @@ router.get('/status', async (req, res) => {
+@@ -321,7 +351,7 @@ router.get('/status', async (req, res) => {
        if (!line.trim()) return;
-
+ 
        const status = line.substring(0, 2);
 -      const file = line.substring(3);
 +      const file = unquoteGitPath(line.substring(3));
-
+ 
        if (status === 'M ' || status === ' M' || status === 'MM') {
          modified.push(file);

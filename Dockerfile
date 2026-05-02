@@ -39,7 +39,8 @@ RUN apt-get update \
 # Coding CLIs available inside the container
 RUN npm install -g --omit=dev \
       @anthropic-ai/claude-code \
-      @openai/codex
+      @openai/codex \
+      task-master-ai
 
 # Git credential helper: reads active PAT from CloudCLI's SQLite DB.
 # Wired at /etc/gitconfig so CloudCLI's UI (which writes ~/.gitconfig) cannot clobber it.

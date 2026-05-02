@@ -125,7 +125,7 @@ index 4ef5400..a4b6a32 100644
 +        method: 'POST',
 +        headers: { 'Content-Type': 'application/json' },
 +        body: JSON.stringify({
-+          project: selectedProject.name,
++          project: selectedProject.projectId,
 +          mode,
 +          tokenName: tokenName || undefined,
 +        }),

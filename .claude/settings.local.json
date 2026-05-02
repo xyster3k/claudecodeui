@@ -10,7 +10,8 @@
       "Read(//tmp/upstream-v1.31.5/server/modules/providers/services/**)",
       "Read(//private/tmp/upstream-v1.31.5/server/modules/providers/services/**)",
       "Read(//tmp/upstream-v1.31.5/shared/**)",
-      "Read(//private/tmp/upstream-v1.31.5/shared/**)"
+      "Read(//private/tmp/upstream-v1.31.5/shared/**)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }

@@ -103,7 +103,7 @@ index 08bfb1a..9b64d57 100644
 +    if (typeof window === 'undefined' || !selectedProject) {
 +      return 'chat';
 +    }
-+    const savedMode = safeLocalStorage.getItem(`workflow_mode_${selectedProject.name}`);
++    const savedMode = safeLocalStorage.getItem(`workflow_mode_${selectedProject.projectId}`);
 +    return savedMode === 'builder' ? 'builder' : 'chat';
 +  });
  
@@ -157,16 +157,16 @@ index 08bfb1a..9b64d57 100644
 +    if (!selectedProject) {
 +      return;
 +    }
-+    safeLocalStorage.setItem(`workflow_mode_${selectedProject.name}`, workflowMode);
++    safeLocalStorage.setItem(`workflow_mode_${selectedProject.projectId}`, workflowMode);
 +  }, [workflowMode, selectedProject]);
 +
 +  useEffect(() => {
 +    if (!selectedProject) {
 +      return;
 +    }
-+    const savedMode = safeLocalStorage.getItem(`workflow_mode_${selectedProject.name}`);
++    const savedMode = safeLocalStorage.getItem(`workflow_mode_${selectedProject.projectId}`);
 +    setWorkflowMode(savedMode === 'builder' ? 'builder' : 'chat');
-+  }, [selectedProject?.name]);
++  }, [selectedProject?.projectId]);
 +
    useEffect(() => {
      if (!selectedProject) {

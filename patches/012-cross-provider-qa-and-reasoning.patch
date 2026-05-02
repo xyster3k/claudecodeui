@@ -35,8 +35,8 @@ index 12b817a..73765f8 100644
  
  const PROVIDER_RUNNERS = {
    claude: queryClaudeSDK,
-@@ -122,6 +141,80 @@ const defaultWorkerModelForProvider = (provider, fallback) => {
-   return fallback || null;
+@@ -117,6 +136,80 @@ const defaultWorkerModelForProvider = (provider, fallback) => {
+   return null;
  };
  
 +const defaultQaModelForProvider = (provider, fallback) => defaultPlannerModelForProvider(provider, fallback);
@@ -236,7 +236,7 @@ index 12b817a..73765f8 100644
    };
    activeBuilderRuns.set(sessionId, runState);
  
-@@ -631,24 +755,38 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+@@ -626,24 +750,39 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
        || defaultWorkerModelForProvider(provider, options.model);
      const integratorModel = builderConfig.orchestration.integratorModel
        || defaultPlannerModelForProvider(provider, options.model);
@@ -254,6 +254,7 @@ index 12b817a..73765f8 100644
 +    const qaModel = builderConfig.qa.enabled && qaProvider
 +      ? (builderConfig.qa.model || defaultQaModelForProvider(qaProvider, options.model))
 +      : null;
++    console.log('[builder] models resolved: planner=%s worker=%s integrator=%s qa=%s (%s) | provider=%s session-model=%s ui-settings=%s', plannerModel, workerModel, integratorModel, qaModel || 'none', qaProvider || 'none', provider, options.model || 'none', options.builderSettings ? 'yes' : 'no');
  
      sendTaskUpdate(writer, sessionId, provider, 'Planner inspecting current project state', 'in_progress');
  

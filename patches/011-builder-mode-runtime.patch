@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..12b817a
 --- /dev/null
 +++ b/server/builder-mode.js
-@@ -0,0 +1,910 @@
+@@ -0,0 +1,904 @@
 +import { randomUUID } from 'node:crypto';
 +import { promises as fs } from 'node:fs';
 +import path from 'node:path';
@@ -109,23 +109,17 @@ index 0000000..12b817a
 +};
 +
 +const defaultPlannerModelForProvider = (provider, fallback) => {
-+  if (provider === 'codex') {
-+    return 'gpt-5.5';
-+  }
-+  if (provider === 'claude') {
-+    return 'opus';
-+  }
-+  return fallback || null;
++  if (fallback) return fallback;
++  if (provider === 'codex') return 'gpt-5.5';
++  if (provider === 'claude') return 'opus';
++  return null;
 +};
 +
 +const defaultWorkerModelForProvider = (provider, fallback) => {
-+  if (provider === 'codex') {
-+    return 'gpt-5.4';
-+  }
-+  if (provider === 'claude') {
-+    return 'sonnet';
-+  }
-+  return fallback || null;
++  if (fallback) return fallback;
++  if (provider === 'codex') return 'gpt-5.4';
++  if (provider === 'claude') return 'sonnet';
++  return null;
 +};
 +
 +export function resolveBuilderApproval(requestId, decision = {}) {

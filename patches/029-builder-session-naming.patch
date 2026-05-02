@@ -1,8 +1,8 @@
 diff --git a/server/builder-mode.js b/server/builder-mode.js
-index 74cfe5d..aabb001 100644
+index cc83069..8c47363 100644
 --- a/server/builder-mode.js
 +++ b/server/builder-mode.js
-@@ -4,6 +4,7 @@ import path from 'node:path';
+@@ -5,6 +5,7 @@ import path from 'node:path';
  import { createNormalizedMessage } from './shared/utils.js';
  import { abortClaudeSDKSession, queryClaudeSDK } from './claude-sdk.js';
  import { abortCursorSession, spawnCursor } from './cursor-cli.js';
@@ -10,52 +10,35 @@ index 74cfe5d..aabb001 100644
  import { abortCodexSession, queryCodex } from './openai-codex.js';
  import { abortGeminiSession, spawnGemini } from './gemini-cli.js';
  import { providerAuthService } from './modules/providers/services/provider-auth.service.js';
-@@ -1671,6 +1672,18 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
-             void persistBuilderRunState(runState, { syncTasks: Boolean(runState.record?.tasksPath) });
-         }
-     };
-+
-+    /**
-+     * Sets a descriptive display name for a builder child session in the DB.
-+     * Called after each child session completes so the DB entry exists.
-+     */
-+    const labelChildSession = (childSessionId, label) => {
-+      if (!childSessionId) return;
-+      try {
-+        sessionsDb.updateSessionCustomName(childSessionId, `Builder: ${label}`);
-+      } catch {
-+        // Non-critical - session may not be indexed yet
-+      }
-+    };
-+
-     const plannerWriter = new BufferedWriter(`${sessionId}-planner`, provider, (childSessionId, childProvider) => {
-         registerChildSession(childSessionId, childProvider, 'planner');
+@@ -1999,6 +2000,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
      });
-@@ -1711,6 +1724,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+     let plannerSessionId = plannerWriter.getSessionId();
+     const workerTasks = plannerResult.tasks;
++    labelChildSession(plannerSessionId, 'Planner');
+     const requestMarkdown = buildUserRequestMarkdown({
+       command,
+       projectPath,
+@@ -2135,6 +2137,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       outOfScopeRisks: planCoverageReview.outOfScopeRisks,
+       reviewerSessionId: planReviewWriter.getSessionId(),
+     });
++    labelChildSession(planReviewWriter.getSessionId(), 'Plan Reviewer');
+     await setBuilderRunPhase(runState, BUILDER_RUN_PHASES.planning, {
+       planCoverageApproved: planCoverageReview.approved,
+       planCoverageSummary: planCoverageReview.coverageSummary,
+@@ -2500,6 +2503,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
          });
-         let plannerSessionId = plannerWriter.getSessionId();
-         const workerTasks = plannerResult.tasks;
-+        labelChildSession(plannerSessionId, 'Planner');
-         const requestMarkdown = buildUserRequestMarkdown({
-             command,
-             projectPath,
-@@ -1832,6 +1846,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
-             reviewerSessionId: planReviewWriter.getSessionId(),
-         });
-+        labelChildSession(planReviewWriter.getSessionId(), 'Plan Reviewer');
-         await setBuilderRunPhase(runState, BUILDER_RUN_PHASES.planning, {
-             planCoverageApproved: planCoverageReview.approved,
-             planCoverageSummary: planCoverageReview.coverageSummary,
-@@ -2148,6 +2163,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
-                 const result = actorWriter.getSummary();
-+                labelChildSession(result.sessionId, actorLabel);
-                 const passArtifact = await persistSlicePassArtifact({
-                     projectPath,
-                     builderSessionId: sessionId,
-@@ -2666,6 +2682,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
-             }
-             const qaResult = qaWriter.getSummary();
-+            labelChildSession(qaWriter.getSessionId(), 'QA');
-             await reportStage(`Cross-provider QA completed with ${qaProvider}`, 'completed', {
-                 stage: BUILDER_RUN_PHASES.qa,
-             });
+ 
+         const result = actorWriter.getSummary();
++        labelChildSession(result.sessionId, actorLabel);
+         const passArtifact = await persistSlicePassArtifact({
+           projectPath,
+           builderSessionId: sessionId,
+@@ -3044,6 +3048,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       }
+ 
+       const qaResult = qaWriter.getSummary();
++      labelChildSession(qaWriter.getSessionId(), 'QA');
+       await reportStage(`Cross-provider QA completed with ${qaProvider}`, 'completed', {
+         stage: BUILDER_RUN_PHASES.qa,
+       });

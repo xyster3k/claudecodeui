@@ -1,11 +1,83 @@
+diff --git a/server/modules/providers/list/claude/claude-session-synchronizer.provider.ts b/server/modules/providers/list/claude/claude-session-synchronizer.provider.ts
+index 7d089a2..2523b2a 100644
+--- a/server/modules/providers/list/claude/claude-session-synchronizer.provider.ts
++++ b/server/modules/providers/list/claude/claude-session-synchronizer.provider.ts
+@@ -5,6 +5,7 @@ import { sessionsDb } from '@/modules/database/index.js';
+ import {
+   buildLookupMap,
+   extractFirstValidJsonlData,
++  extractSessionNameFromJsonl,
+   findFilesRecursivelyCreatedAfter,
+   normalizeSessionName,
+   readFileTimestamps,
+@@ -42,6 +43,11 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
+         continue;
+       }
+ 
++      // When history.jsonl has no display name, extract from the JSONL content
++      if (!parsed.sessionName || parsed.sessionName === 'Untitled Claude Session') {
++        parsed.sessionName = await extractSessionNameFromJsonl(filePath, 'Untitled Claude Session');
++      }
++
+       const timestamps = await readFileTimestamps(filePath);
+       sessionsDb.createSession(
+         parsed.sessionId,
+@@ -72,6 +78,11 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
+       return null;
+     }
+ 
++    // When history.jsonl has no display name, extract from the JSONL content
++    if (!parsed.sessionName || parsed.sessionName === 'Untitled Claude Session') {
++      parsed.sessionName = await extractSessionNameFromJsonl(filePath, 'Untitled Claude Session');
++    }
++
+     const timestamps = await readFileTimestamps(filePath);
+     return sessionsDb.createSession(
+       parsed.sessionId,
+diff --git a/server/modules/providers/list/codex/codex-session-synchronizer.provider.ts b/server/modules/providers/list/codex/codex-session-synchronizer.provider.ts
+index bd1edc0..4600627 100644
+--- a/server/modules/providers/list/codex/codex-session-synchronizer.provider.ts
++++ b/server/modules/providers/list/codex/codex-session-synchronizer.provider.ts
+@@ -5,6 +5,7 @@ import { sessionsDb } from '@/modules/database/index.js';
+ import {
+   buildLookupMap,
+   extractFirstValidJsonlData,
++  extractCodexSessionNameFromJsonl,
+   findFilesRecursivelyCreatedAfter,
+   normalizeSessionName,
+   readFileTimestamps,
+@@ -42,6 +43,11 @@ export class CodexSessionSynchronizer implements IProviderSessionSynchronizer {
+         continue;
+       }
+ 
++      // When session_index.jsonl has no name, extract from the JSONL content
++      if (!parsed.sessionName || parsed.sessionName === 'Untitled Codex Session') {
++        parsed.sessionName = await extractCodexSessionNameFromJsonl(filePath, 'Untitled Codex Session');
++      }
++
+       const existingSession = sessionsDb.getSessionById(parsed.sessionId);
+       if (existingSession) {
+         // If session name is untitled and we now have a name, update it
+@@ -80,6 +86,11 @@ export class CodexSessionSynchronizer implements IProviderSessionSynchronizer {
+       return null;
+     }
+ 
++    // When session_index.jsonl has no name, extract from the JSONL content
++    if (!parsed.sessionName || parsed.sessionName === 'Untitled Codex Session') {
++      parsed.sessionName = await extractCodexSessionNameFromJsonl(filePath, 'Untitled Codex Session');
++    }
++
+     const timestamps = await readFileTimestamps(filePath);
+     return sessionsDb.createSession(
+       parsed.sessionId,
 diff --git a/server/shared/utils.ts b/server/shared/utils.ts
-index 1111111..2222222 100644
+index 84a382c..7fe0c4f 100644
 --- a/server/shared/utils.ts
 +++ b/server/shared/utils.ts
-@@ -667,3 +667,73 @@ export async function extractFirstValidJsonlData<T>(
-
+@@ -667,3 +667,93 @@ export async function extractFirstValidJsonlData<T>(
    return null;
  }
+ 
 +
 +/**
 + * Strips common thinking-mode prefixes from user messages.
@@ -16,9 +88,6 @@ index 1111111..2222222 100644
 +
 +/**
 + * Extracts a human-readable session name from a Claude JSONL transcript file.
-+ *
-+ * Scans the first N lines for a user message and returns a truncated version
-+ * of its text content. Falls back to the supplied default.
 + */
 +export async function extractSessionNameFromJsonl(
 +  filePath: string,
@@ -58,9 +127,6 @@ index 1111111..2222222 100644
 +
 +/**
 + * Extracts a session name from a Codex JSONL transcript file.
-+ *
-+ * Codex sessions have a different format: the first user message is
-+ * environment context XML, so we skip it and use the second one.
 + */
 +export async function extractCodexSessionNameFromJsonl(
 +  filePath: string,
@@ -80,7 +146,7 @@ index 1111111..2222222 100644
 +      const payload = parsed?.payload;
 +      if (payload?.type !== 'message' || payload?.role !== 'user') continue;
 +      userMessageCount++;
-+      if (userMessageCount < 2) continue; // skip environment context
++      if (userMessageCount < 2) continue;
 +
 +      const content = payload?.content;
 +      let text = '';
@@ -102,75 +168,3 @@ index 1111111..2222222 100644
 +  }
 +  return fallback;
 +}
-diff --git a/server/modules/providers/list/claude/claude-session-synchronizer.provider.ts b/server/modules/providers/list/claude/claude-session-synchronizer.provider.ts
-index 3333333..4444444 100644
---- a/server/modules/providers/list/claude/claude-session-synchronizer.provider.ts
-+++ b/server/modules/providers/list/claude/claude-session-synchronizer.provider.ts
-@@ -4,6 +4,7 @@ import { sessionsDb } from '@/modules/database/index.js';
- import {
-   buildLookupMap,
-   extractFirstValidJsonlData,
-+  extractSessionNameFromJsonl,
-   findFilesRecursivelyCreatedAfter,
-   normalizeSessionName,
-   readFileTimestamps,
-@@ -41,6 +42,11 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
-         continue;
-       }
-
-+      // When history.jsonl has no display name, extract from the JSONL content
-+      if (!parsed.sessionName || parsed.sessionName === 'Untitled Claude Session') {
-+        parsed.sessionName = await extractSessionNameFromJsonl(filePath, 'Untitled Claude Session');
-+      }
-+
-       const timestamps = await readFileTimestamps(filePath);
-       sessionsDb.createSession(
-         parsed.sessionId,
-@@ -70,6 +76,11 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
-       return null;
-     }
-
-+    // When history.jsonl has no display name, extract from the JSONL content
-+    if (!parsed.sessionName || parsed.sessionName === 'Untitled Claude Session') {
-+      parsed.sessionName = await extractSessionNameFromJsonl(filePath, 'Untitled Claude Session');
-+    }
-+
-     const timestamps = await readFileTimestamps(filePath);
-     return sessionsDb.createSession(
-       parsed.sessionId,
-diff --git a/server/modules/providers/list/codex/codex-session-synchronizer.provider.ts b/server/modules/providers/list/codex/codex-session-synchronizer.provider.ts
-index 5555555..6666666 100644
---- a/server/modules/providers/list/codex/codex-session-synchronizer.provider.ts
-+++ b/server/modules/providers/list/codex/codex-session-synchronizer.provider.ts
-@@ -4,6 +4,7 @@ import { sessionsDb } from '@/modules/database/index.js';
- import {
-   buildLookupMap,
-   extractFirstValidJsonlData,
-+  extractCodexSessionNameFromJsonl,
-   findFilesRecursivelyCreatedAfter,
-   normalizeSessionName,
-   readFileTimestamps,
-@@ -41,6 +42,11 @@ export class CodexSessionSynchronizer implements IProviderSessionSynchronizer {
-         continue;
-       }
-
-+      // When session_index.jsonl has no name, extract from the JSONL content
-+      if (!parsed.sessionName || parsed.sessionName === 'Untitled Codex Session') {
-+        parsed.sessionName = await extractCodexSessionNameFromJsonl(filePath, 'Untitled Codex Session');
-+      }
-+
-       const existingSession = sessionsDb.getSessionById(parsed.sessionId);
-       if (existingSession) {
-         // If session name is untitled and we now have a name, update it
-@@ -78,6 +84,11 @@ export class CodexSessionSynchronizer implements IProviderSessionSynchronizer {
-       return null;
-     }
-
-+    // When session_index.jsonl has no name, extract from the JSONL content
-+    if (!parsed.sessionName || parsed.sessionName === 'Untitled Codex Session') {
-+      parsed.sessionName = await extractCodexSessionNameFromJsonl(filePath, 'Untitled Codex Session');
-+    }
-+
-     const timestamps = await readFileTimestamps(filePath);
-     return sessionsDb.createSession(
-       parsed.sessionId,

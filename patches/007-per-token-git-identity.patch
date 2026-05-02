@@ -251,7 +251,7 @@ index 1a91b87..658c150 100644
 +    }
 +    // Only for https URLs: wire credential.<url>.username so our helper picks the right token
 +    if (!isSshUrl && tokenIdentity?.name) {
-+      const credKey = `credential.${cleanUrl.replace(/\.git$/, '')}.username`;
++      const credKey = `credential.${cleanUrl.replace(/\.git$/, '') + '.git'}.username`;
 +      cmds.push(['git', ['-C', repoPath, 'config', '--local', credKey, tokenIdentity.name]]);
 +    }
 +

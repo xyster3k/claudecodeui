@@ -40,7 +40,7 @@ index 2aebdad..9d98616 100755
 +    }
 +    if (/^https?:\/\//.test(u)) {
 +      // Look up a per-repo credential.<url>.username override; strip any embedded user@ and .git for the key
-+      const key = `credential.${u.replace(/:\/\/[^@]+@/, '://').replace(/\/$/, '').replace(/\.git$/, '')}.username`;
++      const key = `credential.${u.replace(/:\/\/[^@]+@/, '://').replace(/\/$/, '').replace(/\.git$/, '') + '.git'}.username`;
 +      let tokenName = null;
 +      try {
 +        const { stdout } = await spawnAsync('git', ['config', '--local', '--get', key], { cwd: projectPath });
@@ -90,7 +90,7 @@ index 2aebdad..9d98616 100755
 +    await spawnAsync('git', ['remote', 'set-url', 'origin', targetUrl], { cwd: projectPath });
 +
 +    // SSH: strip any leftover credential.<url>.username section so we don't confuse future operations.
-+    const credSection = `credential.${httpsClean}`;
++    const credSection = `credential.${httpsClean}.git`;
 +    if (mode === 'ssh') {
 +      try { await spawnAsync('git', ['config', '--local', '--remove-section', credSection], { cwd: projectPath }); }
 +      catch (_) {}

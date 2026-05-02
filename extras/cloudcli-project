@@ -85,7 +85,7 @@ cmd_list() {
 		n=$(git -C "$d" config --local --get user.name 2>/dev/null)
 		e=$(git -C "$d" config --local --get user.email 2>/dev/null)
 		remote=$(git -C "$d" remote get-url origin 2>/dev/null | sed -E 's|://[^@]+@|://|')
-		t=$(git -C "$d" config --local --get "credential.${remote%.git}.username" 2>/dev/null)
+		t=$(git -C "$d" config --local --get "credential.${remote%.git}.git.username" 2>/dev/null)
 		printf '%-24s %-18s %-40s %-12s\n' "${name:0:24}" "${n:-<global>}" "${e:-<global>}" "${t:-<global>}"
 	done
 	echo
@@ -131,7 +131,7 @@ cmd_show() {
 	n=$(git -C "$repo" config --local --get user.name 2>/dev/null)
 	e=$(git -C "$repo" config --local --get user.email 2>/dev/null)
 	remote=$(remote_of "$repo")
-	t=$(git -C "$repo" config --local --get "credential.${remote%.git}.username" 2>/dev/null)
+	t=$(git -C "$repo" config --local --get "credential.${remote%.git}.git.username" 2>/dev/null)
 
 	echo "project:    $(basename "$repo")"
 	echo "path:       $repo"
@@ -190,7 +190,7 @@ cmd_token() {
 	local remote
 	remote=$(remote_of "$repo")
 	[ -n "$remote" ] || die "repo has no 'origin' remote — can't scope a token to it"
-	local key="credential.${remote%.git}.username"
+	local key="credential.${remote%.git}.git.username"
 	git -C "$repo" config --local "$key" "$token"
 	echo "set on $(basename "$repo"):"
 	echo "  $key = $token"
@@ -205,9 +205,9 @@ cmd_clear() {
 	local remote
 	remote=$(remote_of "$repo")
 	if [ -n "$remote" ]; then
-		git -C "$repo" config --local --unset "credential.${remote%.git}.username" 2>/dev/null || true
+		git -C "$repo" config --local --unset "credential.${remote%.git}.git.username" 2>/dev/null || true
 		# Also remove the now-empty [credential ...] section
-		git -C "$repo" config --local --remove-section "credential.${remote%.git}" 2>/dev/null || true
+		git -C "$repo" config --local --remove-section "credential.${remote%.git}.git" 2>/dev/null || true
 	fi
 	echo "cleared all overrides on $(basename "$repo") — now uses global Settings."
 }
@@ -261,6 +261,7 @@ cmd_use_ssh() {
 	# SSH auth doesn't go through our credential helper — strip any credential.<url>.username leftover
 	local remote_clean
 	remote_clean=$(echo "$cur" | sed -E 's|://[^@]+@|://|; s|/$||; s|\.git$||')
+	git -C "$repo" config --local --remove-section "credential.${remote_clean}.git" 2>/dev/null || true
 	git -C "$repo" config --local --remove-section "credential.${remote_clean}" 2>/dev/null || true
 	echo "$(basename "$repo") → SSH via ~/.ssh/id_ed25519_deploy"
 	echo "remote is now: $ssh"
@@ -320,8 +321,8 @@ cmd_clear_token() {
 	local remote
 	remote=$(remote_of "$repo")
 	if [ -n "$remote" ]; then
-		git -C "$repo" config --local --unset "credential.${remote%.git}.username" 2>/dev/null || true
-		git -C "$repo" config --local --remove-section "credential.${remote%.git}" 2>/dev/null || true
+		git -C "$repo" config --local --unset "credential.${remote%.git}.git.username" 2>/dev/null || true
+		git -C "$repo" config --local --remove-section "credential.${remote%.git}.git" 2>/dev/null || true
 	fi
 	echo "token override cleared on $(basename "$repo")."
 }

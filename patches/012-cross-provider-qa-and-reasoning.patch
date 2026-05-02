@@ -140,7 +140,7 @@ index 12b817a..73765f8 100644
      production: { ...(acc.production || {}), ...(item.production || {}) },
    };
 @@ -257,6 +352,21 @@ const withDefaultBuilderConfig = (config = {}) => ({
-     production: true,
+     production: false,
      ...(config.approvals || {}),
    },
 +  reasoning: {
@@ -172,8 +172,8 @@ index 12b817a..73765f8 100644
      },
      approvals: {
 @@ -338,6 +449,19 @@ const persistRunArtifacts = async (projectPath, sessionId, prdMarkdown, tasks, c
-       merge: true,
-       production: true,
+       merge: false,
+       production: false,
      },
 +    reasoning: {
 +      planner: 'high',

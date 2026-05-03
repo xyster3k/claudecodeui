@@ -1,0 +1,52 @@
+diff --git a/server/builder-mode.js b/server/builder-mode.js
+index 64b08f6..5cbc234 100644
+--- a/server/builder-mode.js
++++ b/server/builder-mode.js
+@@ -55,6 +55,20 @@ const PROVIDER_ABORTERS = {
+   gemini: abortGeminiSession,
+ };
+ 
++/**
++ * Auto-detect the provider that owns a given model name.
++ * Returns 'claude', 'codex', 'gemini', or null if unknown.
++ */
++const providerForModel = (model) => {
++  if (!model) return null;
++  const m = model.toLowerCase();
++  if (/^(gpt-|o[1-4](-|$)|codex|davinci|text-)/.test(m)) return 'codex';
++  if (/^(claude-|opus|sonnet|haiku)/.test(m)) return 'claude';
++  if (/^(gemini|models\/)/.test(m)) return 'gemini';
++  return null;
++};
++
++
+ const builderApprovalRequests = new Map();
+ const activeBuilderRuns = new Map();
+ const plannerControlSessions = new Map();
+@@ -254,14 +268,14 @@ const createBuilderTaskRuntimeState = (task) => ({
+ });
+ 
+ const defaultPlannerModelForProvider = (provider, fallback) => {
+-  if (fallback) return fallback;
++  if (fallback && (!providerForModel(fallback) || providerForModel(fallback) === provider)) return fallback;
+   if (provider === 'codex') return 'gpt-5.5';
+   if (provider === 'claude') return 'opus';
+   return null;
+ };
+ 
+ const defaultWorkerModelForProvider = (provider, fallback) => {
+-  if (fallback) return fallback;
++  if (fallback && (!providerForModel(fallback) || providerForModel(fallback) === provider)) return fallback;
+   if (provider === 'codex') return 'gpt-5.4';
+   if (provider === 'claude') return 'sonnet';
+   return null;
+@@ -1069,7 +1083,8 @@ class BufferedWriter {
+ }
+ 
+ const runProviderTask = async ({ provider, prompt, options, writer }) => {
+-  const runner = PROVIDER_RUNNERS[provider] || queryClaudeSDK;
++  const effectiveProvider = (options.model && providerForModel(options.model)) || provider;
++  const runner = PROVIDER_RUNNERS[effectiveProvider] || queryClaudeSDK;
+   await runner(prompt, {
+     ...options,
+     workflowMode: 'chat',

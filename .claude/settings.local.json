@@ -13,7 +13,13 @@
       "Read(//private/tmp/upstream-v1.31.5/shared/**)",
       "WebFetch(domain:raw.githubusercontent.com)",
       "Read(//tmp/cloudcli-patch-034/server/**)",
-      "Read(//private/tmp/cloudcli-patch-034/server/**)"
+      "Read(//private/tmp/cloudcli-patch-034/server/**)",
+      "Read(//tmp/claudecodeui-upstream/src/**)",
+      "Read(//private/tmp/claudecodeui-upstream/src/**)",
+      "Read(//tmp/claudecodeui-upstream/server/**)",
+      "Read(//private/tmp/claudecodeui-upstream/server/**)",
+      "Read(//tmp/claudecodeui-upstream/**)",
+      "Read(//private/tmp/claudecodeui-upstream/**)"
     ]
   }
 }

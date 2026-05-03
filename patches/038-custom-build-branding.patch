@@ -1,0 +1,34 @@
+diff --git a/src/components/sidebar/view/subcomponents/SidebarHeader.tsx b/src/components/sidebar/view/subcomponents/SidebarHeader.tsx
+index ab1eed7..da48801 100644
+--- a/src/components/sidebar/view/subcomponents/SidebarHeader.tsx
++++ b/src/components/sidebar/view/subcomponents/SidebarHeader.tsx
+@@ -50,7 +50,15 @@ export default function SidebarHeader({
+           <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+         </svg>
+       </div>
+-      <h1 className="truncate text-sm font-semibold tracking-tight text-foreground">{t('app.title')}</h1>
++      <div className="flex min-w-0 items-center gap-1.5">
++        <h1 className="truncate text-sm font-semibold tracking-tight text-foreground">{t('app.title')}</h1>
++        <span
++          className="rounded-full border border-amber-300/70 bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase leading-none tracking-wide text-amber-800 dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-200"
++          title="Custom build, not the original upstream CloudCLI release"
++        >
++          Custom
++        </span>
++      </div>
+     </div>
+   );
+ 
+diff --git a/src/components/sidebar/view/subcomponents/SidebarProjectList.tsx b/src/components/sidebar/view/subcomponents/SidebarProjectList.tsx
+index 58103cf..f75eebf 100644
+--- a/src/components/sidebar/view/subcomponents/SidebarProjectList.tsx
++++ b/src/components/sidebar/view/subcomponents/SidebarProjectList.tsx
+@@ -104,7 +104,7 @@ export default function SidebarProjectList({
+   );
+ 
+   useEffect(() => {
+-    let baseTitle = 'CloudCLI UI';
++    let baseTitle = 'CloudCLI Custom UI';
+     const displayName = selectedProject?.displayName?.trim();
+     if (displayName) {
+       baseTitle = `${displayName} - ${baseTitle}`;

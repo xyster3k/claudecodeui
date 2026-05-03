@@ -1,0 +1,206 @@
+diff --git a/src/components/app/AppContent.tsx b/src/components/app/AppContent.tsx
+index 55fd9b5..0cc5a21 100644
+--- a/src/components/app/AppContent.tsx
++++ b/src/components/app/AppContent.tsx
+@@ -1,4 +1,4 @@
+-import { useEffect, useRef } from 'react';
++import { useCallback, useEffect, useRef } from 'react';
+ import { useNavigate, useParams } from 'react-router-dom';
+ import { useTranslation } from 'react-i18next';
+ 
+@@ -138,6 +138,34 @@ function AppContentInner() {
+     return () => vv.removeEventListener('resize', update);
+   }, []);
+ 
++  // On mount and on WS reconnect, check for active builder runs on the server
++  // and add them to processingSessions so the sidebar shows a stop button.
++  const syncActiveBuilderRuns = useCallback(async () => {
++    try {
++      const resp = await fetch('/api/builder/runs');
++      if (!resp.ok) return;
++      const data = await resp.json();
++      for (const run of data.runs || []) {
++        if (run.sessionId && run.status === 'running') {
++          markSessionAsProcessing(run.sessionId);
++        }
++      }
++    } catch {
++      // ignore — server may not be reachable yet
++    }
++  }, [markSessionAsProcessing]);
++
++  useEffect(() => {
++    syncActiveBuilderRuns();
++  }, [syncActiveBuilderRuns]);
++
++  // Also sync on WS reconnect
++  useEffect(() => {
++    if (isConnected) {
++      syncActiveBuilderRuns();
++    }
++  }, [isConnected, syncActiveBuilderRuns]);
++
+   const handleAbortSidebarSession = (targetSessionId: string, provider: LLMProvider) => {
+     sendMessage({
+       type: 'abort-session',
+diff --git a/src/components/chat/hooks/useChatRealtimeHandlers.ts b/src/components/chat/hooks/useChatRealtimeHandlers.ts
+index 694f938..f7058f0 100644
+--- a/src/components/chat/hooks/useChatRealtimeHandlers.ts
++++ b/src/components/chat/hooks/useChatRealtimeHandlers.ts
+@@ -126,6 +126,19 @@ export function useChatRealtimeHandlers({
+           onWebSocketReconnect?.();
+           return;
+ 
++        case 'builder-reattach-ok': {
++          // Successfully reattached to a running builder — messages are being replayed.
++          const reattachSessionId = msg.sessionId;
++          if (reattachSessionId) {
++            setCurrentSessionId(reattachSessionId);
++            onSessionProcessing?.(reattachSessionId);
++            onReplaceTemporarySession?.(reattachSessionId);
++            setIsLoading(true);
++            setCanAbortSession(true);
++          }
++          return;
++        }
++
+         case 'pending-permissions-response': {
+           const permSessionId = msg.sessionId;
+           const isCurrentPermSession =
+diff --git a/src/components/chat/view/ChatInterface.tsx b/src/components/chat/view/ChatInterface.tsx
+index e0447a4..b394bda 100644
+--- a/src/components/chat/view/ChatInterface.tsx
++++ b/src/components/chat/view/ChatInterface.tsx
+@@ -1,4 +1,4 @@
+-import React, { useCallback, useEffect, useMemo, useRef } from 'react';
++import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+ import { useTranslation } from 'react-i18next';
+ 
+ import { useTasksSettings } from '../../../contexts/TasksSettingsContext';
+@@ -284,9 +284,23 @@ function ChatInterface({
+     if (!isLoading) return;
+ 
+     const STALE_TIMEOUT = 30_000;
+-    const checkInterval = setInterval(() => {
++    const checkInterval = setInterval(async () => {
+       const elapsed = Date.now() - lastMessageTimestampRef.current;
+       if (elapsed >= STALE_TIMEOUT) {
++        // Before resetting, check if there's an active builder run on the server
++        try {
++          const resp = await fetch('/api/builder/runs');
++          if (resp.ok) {
++            const data = await resp.json();
++            if (data.runs?.length > 0) {
++              // Active builder run exists — don't reset, it's still running
++              lastMessageTimestampRef.current = Date.now();
++              return;
++            }
++          }
++        } catch {
++          // Fetch failed — proceed with reset
++        }
+         console.warn('[ChatInterface] Loading state stale for 30s, auto-resetting');
+         setIsLoading(false);
+         setCanAbortSession(false);
+@@ -297,6 +311,55 @@ function ChatInterface({
+     return () => clearInterval(checkInterval);
+   }, [isLoading, setIsLoading, setCanAbortSession, setClaudeStatus]);
+ 
++  // Active builder run detection: on page load, check if there's an active
++  // builder run on the server that we should reconnect to.
++  const [activeBuilderRun, setActiveBuilderRun] = useState<{
++    sessionId: string;
++    command: string;
++    phase: string;
++    messageCount: number;
++  } | null>(null);
++
++  useEffect(() => {
++    let cancelled = false;
++    const checkActiveRuns = async () => {
++      try {
++        const resp = await fetch('/api/builder/runs');
++        if (!resp.ok || cancelled) return;
++        const data = await resp.json();
++        const runs = data.runs || [];
++        if (runs.length > 0 && !cancelled) {
++          setActiveBuilderRun({
++            sessionId: runs[0].sessionId,
++            command: runs[0].command,
++            phase: runs[0].phase,
++            messageCount: runs[0].messageCount || 0,
++          });
++        } else {
++          setActiveBuilderRun(null);
++        }
++      } catch {
++        // ignore
++      }
++    };
++    checkActiveRuns();
++    return () => { cancelled = true; };
++  }, []);
++
++  const handleReconnectBuilder = useCallback(() => {
++    if (!activeBuilderRun || !sendMessage) return;
++    sendMessage({
++      type: 'builder-reattach',
++      sessionId: activeBuilderRun.sessionId,
++      fromIndex: 0,
++    });
++    setCurrentSessionId(activeBuilderRun.sessionId);
++    onSessionProcessing?.(activeBuilderRun.sessionId);
++    setIsLoading(true);
++    setCanAbortSession(true);
++    setActiveBuilderRun(null);
++  }, [activeBuilderRun, sendMessage, setCurrentSessionId, onSessionProcessing, setIsLoading, setCanAbortSession]);
++
+   useEffect(() => {
+     return () => {
+       resetStreamingState();
+@@ -335,6 +398,31 @@ function ChatInterface({
+   return (
+     <PermissionContext.Provider value={permissionContextValue}>
+       <div className="flex h-full flex-col">
++        {activeBuilderRun && !isLoading && (
++          <div className="flex items-center justify-between border-b border-sky-200 bg-sky-50 px-4 py-2 dark:border-sky-800 dark:bg-sky-900/20">
++            <div className="flex items-center gap-2 text-sm text-sky-700 dark:text-sky-300">
++              <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-sky-500" />
++              <span>
++                {t('builder.reconnectBanner', {
++                  command: activeBuilderRun.command
++                    ? (activeBuilderRun.command.length > 60
++                        ? activeBuilderRun.command.slice(0, 60) + '...'
++                        : activeBuilderRun.command)
++                    : 'Builder run',
++                  phase: activeBuilderRun.phase,
++                  defaultValue: 'Builder run in progress: {{command}} ({{phase}})',
++                })}
++              </span>
++            </div>
++            <button
++              type="button"
++              onClick={handleReconnectBuilder}
++              className="rounded-md bg-sky-600 px-3 py-1 text-xs font-medium text-white hover:bg-sky-700 dark:bg-sky-500 dark:hover:bg-sky-600"
++            >
++              {t('builder.reconnect', { defaultValue: 'Reconnect' })}
++            </button>
++          </div>
++        )}
+         <ChatMessagesPane
+           scrollContainerRef={scrollContainerRef}
+           onWheel={handleScroll}
+diff --git a/src/i18n/locales/en/chat.json b/src/i18n/locales/en/chat.json
+index 79f758b..ac3a57f 100644
+--- a/src/i18n/locales/en/chat.json
++++ b/src/i18n/locales/en/chat.json
+@@ -279,5 +279,9 @@
+   },
+   "tasks": {
+     "nextTaskPrompt": "Start the next task"
++  },
++  "builder": {
++    "reconnectBanner": "Builder run in progress: {{command}} ({{phase}})",
++    "reconnect": "Reconnect"
+   }
+ }

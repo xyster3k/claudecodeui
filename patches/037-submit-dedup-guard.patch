@@ -1,0 +1,48 @@
+diff --git a/src/components/chat/hooks/useChatComposerState.ts b/src/components/chat/hooks/useChatComposerState.ts
+index 76e05f0..af37586 100644
+--- a/src/components/chat/hooks/useChatComposerState.ts
++++ b/src/components/chat/hooks/useChatComposerState.ts
+@@ -175,6 +175,7 @@ export function useChatComposerState({
+     ((event: FormEvent<HTMLFormElement> | MouseEvent | TouchEvent | KeyboardEvent<HTMLTextAreaElement>) => Promise<void>) | null
+   >(null);
+   const inputValueRef = useRef(input);
++  const isSendingRef = useRef(false);
+ 
+   const handleBuiltInCommand = useCallback(
+     (result: CommandExecutionResult) => {
+@@ -492,6 +493,11 @@ export function useChatComposerState({
+       if (!currentInput.trim() || isLoading || !selectedProject) {
+         return;
+       }
++      // Guard against double-submit (onMouseDown + form submit both fire onSubmit)
++      if (isSendingRef.current) {
++        return;
++      }
++      isSendingRef.current = true;
+ 
+       // Intercept slash commands: if input starts with /commandName, execute as command with args
+       const trimmedInput = currentInput.trim();
+@@ -511,6 +517,7 @@ export function useChatComposerState({
+           if (textareaRef.current) {
+             textareaRef.current.style.height = 'auto';
+           }
++          isSendingRef.current = false;
+           return;
+         }
+       }
+@@ -549,6 +556,7 @@ export function useChatComposerState({
+             content: `Failed to upload images: ${message}`,
+             timestamp: new Date(),
+           });
++          isSendingRef.current = false;
+           return;
+         }
+       }
+@@ -710,6 +718,7 @@ export function useChatComposerState({
+       if (textareaRef.current) {
+         textareaRef.current.style.height = 'auto';
+       }
++      isSendingRef.current = false;
+ 
+       safeLocalStorage.removeItem(`draft_input_${selectedProject.projectId}`);
+     },

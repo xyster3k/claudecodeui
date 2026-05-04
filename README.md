@@ -2,7 +2,9 @@
 
 This repository builds `siteboon/claudecodeui` from the upstream CloudCLI source, applies local patches, and packages the result as the custom image used by the `claudecodeui` service.
 
-The running UI is intentionally marked as `CloudCLI Custom` so users can tell it is not the original upstream release.
+The running UI is intentionally marked as `CloudCLI Custom`, `xyster3k`, and the current custom patch level (`p038`) so users can tell it is not the original upstream release.
+
+Custom repository link used in the UI: `https://github.com/xyster3k/claudecodeui`.
 
 ## Why This Exists
 
@@ -50,7 +52,8 @@ Tips:
 - Use the star button to keep active projects at the top.
 - Expand several projects when comparing recent activity across workstreams.
 - Use the stop button on a project/session row to terminate an active run without opening the chat.
-- The `Custom` badge beside `CloudCLI` means this image contains local patches.
+- The header reads `CloudCLI Custom` and shows `xyster3k p038`; update this patch level whenever a new numbered patch is added.
+- The GitHub star badge links to the xyster3k custom repository, not the upstream project.
 
 ### Chat And Run Control
 
@@ -109,7 +112,7 @@ Tips:
 
 ## Custom Feature Inventory
 
-Every user-visible patch should be listed here when added. Keep this table current so users and operators know what differs from upstream.
+Every user-visible patch should be listed here when added. Keep this table current so users and operators know what differs from upstream. Also update the visible custom patch level in `038-custom-build-branding.patch` whenever the newest patch number changes.
 
 | Patch | Feature | User impact |
 | --- | --- | --- |
@@ -149,7 +152,7 @@ Every user-visible patch should be listed here when added. Keep this table curre
 | `035-detachable-builder-writer.patch` | Detachable builder writer | Builder output can survive writer/session detach scenarios. |
 | `036-builder-reconnect-ui.patch` | Builder reconnect UI | Users can reconnect to ongoing builder work. |
 | `037-submit-dedup-guard.patch` | Submit dedup guard | Prevents accidental duplicate message submissions. |
-| `038-custom-build-branding.patch` | Custom build branding | Sidebar and browser title identify the image as a custom build. |
+| `038-custom-build-branding.patch` | Custom build branding | Sidebar, browser title, footer version, Settings/About, issue links, and GitHub star links identify this as `CloudCLI Custom p038 by xyster3k`. |
 
 ## Adding A Feature
 
@@ -157,9 +160,10 @@ Every user-visible patch should be listed here when added. Keep this table curre
 2. Apply the current `patches/` stack in filename order.
 3. Make the change in the upstream clone.
 4. Save the diff as the next numbered patch, for example `039-my-feature.patch`.
-5. Add a row to the Custom Feature Inventory.
-6. Add usage notes under User Guide if users need to know how to operate the feature.
-7. Rebuild and verify.
+5. Update the visible custom patch level in `038-custom-build-branding.patch` from `p038` to the new latest patch number.
+6. Add a row to the Custom Feature Inventory.
+7. Add usage notes under User Guide if users need to know how to operate the feature.
+8. Rebuild and verify.
 
 Example patch workflow:
 
@@ -195,7 +199,7 @@ Before deploying a new patch:
 1. Confirm all patches apply against the pinned upstream commit.
 2. Run the frontend/server build through Docker.
 3. Smoke-test login, sidebar load, chat submit, stop/abort, Settings, Git panel, and Builder mode if touched.
-4. Check that the sidebar shows `CloudCLI` with a `Custom` badge.
+4. Check that the sidebar shows `CloudCLI Custom` and the latest `xyster3k pNNN` patch level.
 5. Update this README in the same change as the patch.
 
 ## Troubleshooting

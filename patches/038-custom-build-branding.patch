@@ -1,34 +1,249 @@
+diff --git a/src/components/settings/view/tabs/AboutTab.tsx b/src/components/settings/view/tabs/AboutTab.tsx
+index 027af75..4c61212 100644
+--- a/src/components/settings/view/tabs/AboutTab.tsx
++++ b/src/components/settings/view/tabs/AboutTab.tsx
+@@ -7,3 +7,5 @@ import { Cloud, Users } from 'lucide-react';
+ 
+-const GITHUB_REPO_URL = 'https://github.com/siteboon/claudecodeui';
++const UPSTREAM_GITHUB_REPO_URL = 'https://github.com/siteboon/claudecodeui';
++const CUSTOM_GITHUB_REPO_URL = 'https://github.com/xyster3k/claudecodeui';
++const CUSTOM_BUILD_PATCH = 'p038';
+ const DISCORD_URL = 'https://discord.gg/buxwujPNRE';
+@@ -31,3 +33,3 @@ export default function AboutTab() {
+   const { updateAvailable, latestVersion, currentVersion, releaseInfo } = useVersionCheck('siteboon', 'claudecodeui');
+-  const releasesUrl = releaseInfo?.htmlUrl || `${GITHUB_REPO_URL}/releases`;
++  const releasesUrl = releaseInfo?.htmlUrl || `${UPSTREAM_GITHUB_REPO_URL}/releases`;
+ 
+@@ -42,3 +44,11 @@ export default function AboutTab() {
+           <div className="flex items-center gap-2">
+-            <span className="text-base font-semibold text-foreground">CloudCLI</span>
++            <span className="text-base font-semibold text-foreground">CloudCLI Custom</span>
++            <a
++              href={CUSTOM_GITHUB_REPO_URL}
++              target="_blank"
++              rel="noopener noreferrer"
++              className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-700 transition-colors hover:bg-amber-500/20 dark:text-amber-300"
++            >
++              xyster3k {CUSTOM_BUILD_PATCH}
++            </a>
+             <a
+@@ -49,3 +59,3 @@ export default function AboutTab() {
+             >
+-              v{currentVersion}
++              upstream v{currentVersion}
+             </a>
+@@ -64,3 +74,3 @@ export default function AboutTab() {
+           <p className="mt-0.5 text-sm text-muted-foreground">
+-            Open-source AI coding assistant interface
++            Custom build of the open-source CloudCLI AI coding assistant interface
+           </p>
+@@ -71,3 +81,3 @@ export default function AboutTab() {
+       <a
+-        href={GITHUB_REPO_URL}
++        href={CUSTOM_GITHUB_REPO_URL}
+         target="_blank"
+@@ -78,3 +88,3 @@ export default function AboutTab() {
+         <Star className="h-3.5 w-3.5" />
+-        <span>Star on GitHub</span>
++        <span>Star custom build on GitHub</span>
+       </a>
+@@ -84,3 +94,12 @@ export default function AboutTab() {
+         <a
+-          href={GITHUB_REPO_URL}
++          href={CUSTOM_GITHUB_REPO_URL}
++          target="_blank"
++          rel="noopener noreferrer"
++          className="flex items-center gap-1.5 text-muted-foreground transition-colors hover:text-foreground"
++        >
++          <GitHubIcon className="h-4 w-4" />
++          Custom GitHub
++        </a>
++        <a
++          href={UPSTREAM_GITHUB_REPO_URL}
+           target="_blank"
+@@ -90,3 +109,3 @@ export default function AboutTab() {
+           <GitHubIcon className="h-4 w-4" />
+-          GitHub
++          Upstream
+         </a>
+diff --git a/src/components/settings/view/tabs/api-settings/sections/VersionInfoSection.tsx b/src/components/settings/view/tabs/api-settings/sections/VersionInfoSection.tsx
+index a7d5f83..a64de3d 100644
+--- a/src/components/settings/view/tabs/api-settings/sections/VersionInfoSection.tsx
++++ b/src/components/settings/view/tabs/api-settings/sections/VersionInfoSection.tsx
+@@ -5,3 +5,5 @@ import type { ReleaseInfo } from '../../../../../../types/sharedTypes';
+ 
+-const GITHUB_REPO_URL = 'https://github.com/siteboon/claudecodeui';
++const UPSTREAM_GITHUB_REPO_URL = 'https://github.com/siteboon/claudecodeui';
++const CUSTOM_GITHUB_REPO_URL = 'https://github.com/xyster3k/claudecodeui';
++const CUSTOM_BUILD_PATCH = 'p038';
+ const DISCORD_URL = 'https://discord.gg/buxwujPNRE';
+@@ -40,3 +42,3 @@ export default function VersionInfoSection({
+   const { t } = useTranslation('settings');
+-  const releasesUrl = releaseInfo?.htmlUrl || `${GITHUB_REPO_URL}/releases`;
++  const releasesUrl = releaseInfo?.htmlUrl || `${UPSTREAM_GITHUB_REPO_URL}/releases`;
+ 
+@@ -53,3 +55,11 @@ export default function VersionInfoSection({
+             <div className="flex items-center gap-2">
+-              <span className="text-sm font-semibold text-foreground">CloudCLI</span>
++              <span className="text-sm font-semibold text-foreground">CloudCLI Custom</span>
++              <a
++                href={CUSTOM_GITHUB_REPO_URL}
++                target="_blank"
++                rel="noopener noreferrer"
++                className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-700 transition-colors hover:bg-amber-500/20 dark:text-amber-300"
++              >
++                xyster3k {CUSTOM_BUILD_PATCH}
++              </a>
+               <a
+@@ -60,3 +70,3 @@ export default function VersionInfoSection({
+               >
+-                v{currentVersion}
++                upstream v{currentVersion}
+               </a>
+@@ -75,3 +85,3 @@ export default function VersionInfoSection({
+             <p className="mt-0.5 text-xs text-muted-foreground">
+-              Open-source AI coding assistant interface
++              Custom build of the open-source CloudCLI AI coding assistant interface
+             </p>
+@@ -82,3 +92,3 @@ export default function VersionInfoSection({
+         <a
+-          href={GITHUB_REPO_URL}
++          href={CUSTOM_GITHUB_REPO_URL}
+           target="_blank"
+@@ -89,3 +99,3 @@ export default function VersionInfoSection({
+           <Star className="h-3.5 w-3.5" />
+-          <span>Star on GitHub</span>
++          <span>Star custom build on GitHub</span>
+         </a>
+@@ -95,3 +105,12 @@ export default function VersionInfoSection({
+           <a
+-            href={GITHUB_REPO_URL}
++            href={CUSTOM_GITHUB_REPO_URL}
++            target="_blank"
++            rel="noopener noreferrer"
++            className="flex items-center gap-1 text-muted-foreground transition-colors hover:text-foreground"
++          >
++            <GitHubIcon className="h-3.5 w-3.5" />
++            Custom GitHub
++          </a>
++          <a
++            href={UPSTREAM_GITHUB_REPO_URL}
+             target="_blank"
+@@ -101,3 +120,3 @@ export default function VersionInfoSection({
+             <GitHubIcon className="h-3.5 w-3.5" />
+-            GitHub
++            Upstream
+           </a>
+diff --git a/src/components/sidebar/view/subcomponents/GitHubStarBadge.tsx b/src/components/sidebar/view/subcomponents/GitHubStarBadge.tsx
+index 539710c..df8a4cc 100644
+--- a/src/components/sidebar/view/subcomponents/GitHubStarBadge.tsx
++++ b/src/components/sidebar/view/subcomponents/GitHubStarBadge.tsx
+@@ -4,3 +4,5 @@ import { IS_PLATFORM } from '../../../../constants/config';
+ 
+-const GITHUB_REPO_URL = 'https://github.com/siteboon/claudecodeui';
++const CUSTOM_GITHUB_OWNER = 'xyster3k';
++const CUSTOM_GITHUB_REPO = 'claudecodeui';
++const GITHUB_REPO_URL = `https://github.com/${CUSTOM_GITHUB_OWNER}/${CUSTOM_GITHUB_REPO}`;
+ 
+@@ -15,3 +17,3 @@ function GitHubIcon({ className }: { className?: string }) {
+ export default function GitHubStarBadge() {
+-  const { formattedCount, isDismissed, dismiss } = useGitHubStars('siteboon', 'claudecodeui');
++  const { formattedCount, isDismissed, dismiss } = useGitHubStars(CUSTOM_GITHUB_OWNER, CUSTOM_GITHUB_REPO);
+ 
+@@ -29,3 +31,3 @@ export default function GitHubStarBadge() {
+         <Star className="h-3 w-3" />
+-        <span className="font-medium">Star</span>
++        <span className="font-medium">Star Custom</span>
+         {formattedCount && (
+diff --git a/src/components/sidebar/view/subcomponents/SidebarCollapsed.tsx b/src/components/sidebar/view/subcomponents/SidebarCollapsed.tsx
+index 90a6338..54018ce 100644
+--- a/src/components/sidebar/view/subcomponents/SidebarCollapsed.tsx
++++ b/src/components/sidebar/view/subcomponents/SidebarCollapsed.tsx
+@@ -4,3 +4,3 @@ import type { TFunction } from 'i18next';
+ const DISCORD_INVITE_URL = 'https://discord.gg/buxwujPNRE';
+-const GITHUB_ISSUES_URL = 'https://github.com/siteboon/claudecodeui/issues/new';
++const GITHUB_ISSUES_URL = 'https://github.com/xyster3k/claudecodeui/issues/new';
+ 
+diff --git a/src/components/sidebar/view/subcomponents/SidebarFooter.tsx b/src/components/sidebar/view/subcomponents/SidebarFooter.tsx
+index b024be3..77e0653 100644
+--- a/src/components/sidebar/view/subcomponents/SidebarFooter.tsx
++++ b/src/components/sidebar/view/subcomponents/SidebarFooter.tsx
+@@ -5,4 +5,6 @@ import type { ReleaseInfo } from '../../../../types/sharedTypes';
+ 
+-const GITHUB_ISSUES_URL = 'https://github.com/siteboon/claudecodeui/issues/new';
+-const GITHUB_REPO_URL = 'https://github.com/siteboon/claudecodeui';
++const GITHUB_ISSUES_URL = 'https://github.com/xyster3k/claudecodeui/issues/new';
++const UPSTREAM_GITHUB_REPO_URL = 'https://github.com/siteboon/claudecodeui';
++const CUSTOM_GITHUB_REPO_URL = 'https://github.com/xyster3k/claudecodeui';
++const CUSTOM_BUILD_PATCH = 'p038';
+ 
+@@ -131,8 +133,16 @@ export default function SidebarFooter({
+           <a
+-            href={GITHUB_REPO_URL}
++            href={CUSTOM_GITHUB_REPO_URL}
+             target="_blank"
+             rel="noopener noreferrer"
+-            className="text-[10px] text-muted-foreground/40 transition-colors hover:text-muted-foreground"
++            className="block text-[10px] font-medium text-muted-foreground/60 transition-colors hover:text-muted-foreground"
+           >
+-            CloudCLI v{currentVersion} – {t('branding.openSource')}
++            CloudCLI Custom {CUSTOM_BUILD_PATCH} by xyster3k
++          </a>
++          <a
++            href={UPSTREAM_GITHUB_REPO_URL}
++            target="_blank"
++            rel="noopener noreferrer"
++            className="mt-0.5 block text-[10px] text-muted-foreground/40 transition-colors hover:text-muted-foreground"
++          >
++            upstream v{currentVersion} - {t('branding.openSource')}
+           </a>
+@@ -183,2 +193,23 @@ export default function SidebarFooter({
+       </div>
++
++      {!IS_PLATFORM && (
++        <div className="px-3 pb-3 text-center md:hidden">
++          <a
++            href={CUSTOM_GITHUB_REPO_URL}
++            target="_blank"
++            rel="noopener noreferrer"
++            className="block text-xs font-medium text-muted-foreground/70"
++          >
++            CloudCLI Custom {CUSTOM_BUILD_PATCH} by xyster3k
++          </a>
++          <a
++            href={UPSTREAM_GITHUB_REPO_URL}
++            target="_blank"
++            rel="noopener noreferrer"
++            className="mt-0.5 block text-[11px] text-muted-foreground/50"
++          >
++            upstream v{currentVersion} - {t('branding.openSource')}
++          </a>
++        </div>
++      )}
+     </div>
 diff --git a/src/components/sidebar/view/subcomponents/SidebarHeader.tsx b/src/components/sidebar/view/subcomponents/SidebarHeader.tsx
-index ab1eed7..da48801 100644
+index ab1eed7..339c063 100644
 --- a/src/components/sidebar/view/subcomponents/SidebarHeader.tsx
 +++ b/src/components/sidebar/view/subcomponents/SidebarHeader.tsx
-@@ -50,7 +50,15 @@ export default function SidebarHeader({
-           <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-         </svg>
+@@ -52,3 +52,11 @@ export default function SidebarHeader({
        </div>
 -      <h1 className="truncate text-sm font-semibold tracking-tight text-foreground">{t('app.title')}</h1>
 +      <div className="flex min-w-0 items-center gap-1.5">
-+        <h1 className="truncate text-sm font-semibold tracking-tight text-foreground">{t('app.title')}</h1>
++        <h1 className="truncate text-sm font-semibold tracking-tight text-foreground">CloudCLI Custom</h1>
 +        <span
 +          className="rounded-full border border-amber-300/70 bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase leading-none tracking-wide text-amber-800 dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-200"
-+          title="Custom build, not the original upstream CloudCLI release"
++          title="xyster3k custom build, patch p038, not the original upstream CloudCLI release"
 +        >
-+          Custom
++          xyster3k p038
 +        </span>
 +      </div>
      </div>
-   );
- 
 diff --git a/src/components/sidebar/view/subcomponents/SidebarProjectList.tsx b/src/components/sidebar/view/subcomponents/SidebarProjectList.tsx
-index 58103cf..f75eebf 100644
+index 58103cf..6caf4dc 100644
 --- a/src/components/sidebar/view/subcomponents/SidebarProjectList.tsx
 +++ b/src/components/sidebar/view/subcomponents/SidebarProjectList.tsx
-@@ -104,7 +104,7 @@ export default function SidebarProjectList({
-   );
- 
+@@ -106,3 +106,3 @@ export default function SidebarProjectList({
    useEffect(() => {
 -    let baseTitle = 'CloudCLI UI';
-+    let baseTitle = 'CloudCLI Custom UI';
++    let baseTitle = 'CloudCLI Custom p038 by xyster3k';
      const displayName = selectedProject?.displayName?.trim();
-     if (displayName) {
-       baseTitle = `${displayName} - ${baseTitle}`;

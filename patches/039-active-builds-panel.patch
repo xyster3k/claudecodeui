@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..e259a6d
 --- /dev/null
 +++ b/src/components/sidebar/view/subcomponents/ActiveBuildsPanel.tsx
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,161 @@
 +import { useCallback, useEffect, useRef, useState } from 'react';
 +import { useTranslation } from 'react-i18next';
 +import { Hammer, Square, ChevronDown, ChevronRight } from 'lucide-react';

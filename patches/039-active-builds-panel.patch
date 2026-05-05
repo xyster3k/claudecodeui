@@ -3,13 +3,12 @@ new file mode 100644
 index 0000000..e259a6d
 --- /dev/null
 +++ b/src/components/sidebar/view/subcomponents/ActiveBuildsPanel.tsx
-@@ -0,0 +1,189 @@
+@@ -0,0 +1,156 @@
 +import { useCallback, useEffect, useRef, useState } from 'react';
 +import { useTranslation } from 'react-i18next';
-+import { Hammer, Link, Square, ChevronDown, ChevronRight } from 'lucide-react';
++import { Hammer, Square, ChevronDown, ChevronRight } from 'lucide-react';
 +
 +import { authenticatedFetch } from '../../../../utils/api';
-+import { useWebSocket } from '../../../../contexts/WebSocketContext';
 +
 +type BuilderRun = {
 +  sessionId: string;
@@ -49,7 +48,6 @@ index 0000000..e259a6d
 +
 +export default function ActiveBuildsPanel() {
 +  const { t } = useTranslation('sidebar');
-+  const { sendMessage } = useWebSocket();
 +  const [runs, setRuns] = useState<BuilderRun[]>([]);
 +  const [expanded, setExpanded] = useState(true);
 +  const [aborting, setAborting] = useState<Set<string>>(new Set());
@@ -90,14 +88,6 @@ index 0000000..e259a6d
 +      });
 +    }
 +  }, [fetchRuns]);
-+
-+  const handleReconnect = useCallback((sessionId: string) => {
-+    sendMessage({
-+      type: 'builder-reattach',
-+      sessionId,
-+      fromIndex: 0,
-+    });
-+  }, [sendMessage]);
 +
 +  if (runs.length === 0) return null;
 +
@@ -152,27 +142,9 @@ index 0000000..e259a6d
 +                  {run.provider !== 'claude' && (
 +                    <span className="rounded bg-muted px-1 py-0.5 uppercase">{run.provider}</span>
 +                  )}
-+                  {!run.attached && (
-+                    <span className="text-amber-600 dark:text-amber-400">
-+                      {t('activeBuilds.detached', { defaultValue: 'detached' })}
-+                    </span>
-+                  )}
 +                </div>
 +
 +                <div className="flex items-center gap-1">
-+                  {/* Reconnect button (when detached) */}
-+                  {!run.attached && (
-+                    <button
-+                      type="button"
-+                      className="flex h-6 items-center gap-1 rounded-md border border-sky-200 bg-sky-50 px-2 text-[10px] font-medium text-sky-700 transition-colors hover:bg-sky-100 dark:border-sky-800 dark:bg-sky-900/30 dark:text-sky-300 dark:hover:bg-sky-900/50"
-+                      onClick={() => handleReconnect(run.sessionId)}
-+                      title={t('activeBuilds.reconnect', { defaultValue: 'Reconnect' })}
-+                    >
-+                      <Link className="h-3 w-3" />
-+                      {t('activeBuilds.reconnect', { defaultValue: 'Reconnect' })}
-+                    </button>
-+                  )}
-+
 +                  {/* Stop button */}
 +                  <button
 +                    type="button"
@@ -208,7 +180,7 @@ index 3e675f2..ef01e2b 100644
 @@ -117,6 +118,8 @@ export default function SidebarContent({
          t={t}
        />
- 
+
 +      <ActiveBuildsPanel />
 +
        <ScrollArea className="flex-1 overflow-y-auto overscroll-contain md:px-1.5 md:py-2">
@@ -218,15 +190,13 @@ diff --git a/src/i18n/locales/en/sidebar.json b/src/i18n/locales/en/sidebar.json
 index c0a2ea6..7f504e8 100644
 --- a/src/i18n/locales/en/sidebar.json
 +++ b/src/i18n/locales/en/sidebar.json
-@@ -124,6 +124,13 @@
+@@ -124,6 +124,11 @@
      "projectsScanned_one": "{{count}} project scanned",
      "projectsScanned_other": "{{count}} projects scanned"
    },
 +  "activeBuilds": {
 +    "title": "Active Builds ({{count}})",
 +    "stop": "Stop",
-+    "reconnect": "Reconnect",
-+    "detached": "detached",
 +    "untitled": "Builder run"
 +  },
    "deleteConfirmation": {

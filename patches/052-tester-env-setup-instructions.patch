@@ -1,8 +1,8 @@
 diff --git a/server/tester-mode.js b/server/tester-mode.js
-index 8538858..39210dc 100644
+index 8538858..a56be8c 100644
 --- a/server/tester-mode.js
 +++ b/server/tester-mode.js
-@@ -207,6 +207,48 @@ const loadBuilderArtifacts = async (projectPath, builderRunId) => {
+@@ -207,6 +207,58 @@ const loadBuilderArtifacts = async (projectPath, builderRunId) => {
  
  // ---- Prompt Building ----
  
@@ -11,6 +11,14 @@ index 8538858..39210dc 100644
 +  '',
 +  'You have FULL shell access with all permissions bypassed. Use it aggressively.',
 +  'You can run ANY command, install ANY package, SSH into remote servers, query databases, read logs — whatever is needed.',
++  '',
++  '### Project Instructions & Memory (READ FIRST)',
++  'Before doing anything else, read the project instructions and memory files for project-specific context:',
++  '- `CLAUDE.md` in the project root — contains SSH commands, server addresses, deploy steps, DB access, project-specific rules',
++  '- `.claude/CLAUDE.md` if it exists — additional project instructions',
++  '- `~/.claude/CLAUDE.md` — global user instructions (SSH keys, server aliases, workflow rules)',
++  '- `.claude/memory/` or `~/.claude/projects/*/memory/` — persistent memory files with learned patterns, server info, credentials locations',
++  'These files are the BEST source of truth for how to access servers, databases, and deploy for this specific project.',
 +  '',
 +  '### Project Runtime Environment',
 +  'Before running tests or any project commands:',
@@ -28,13 +36,15 @@ index 8538858..39210dc 100644
 +  '',
 +  '### Remote Server Access (SSH)',
 +  'You can SSH into remote servers to check logs, verify deployments, or inspect running services.',
++  '- **First**: check `CLAUDE.md` and memory files for project-specific SSH commands and server addresses',
 +  '- SSH keys are at `~/.ssh/` — check `~/.ssh/config` for configured hosts',
-+  '- Look in the project for server addresses: `.env`, `config.py`, `deploy.sh`, `Makefile`, `docker-compose.yml`, README',
++  '- Also look in: `.env`, `config.py`, `deploy.sh`, `Makefile`, `docker-compose.yml`, README',
 +  '- Common patterns: `ssh -i ~/.ssh/id_ed25519_deploy user@host`, or use Host aliases from ssh config',
 +  '- Use SSH to: tail logs, check process status, verify endpoints, inspect config on the server',
 +  '',
 +  '### Database Access',
-+  '- Look for database connection strings in: `.env`, `config.py`, `settings.py`, `database.yml`, `docker-compose.yml`',
++  '- **First**: check `CLAUDE.md` and memory files for DB connection details',
++  '- Look for connection strings in: `.env`, `config.py`, `settings.py`, `database.yml`, `docker-compose.yml`',
 +  '- Install DB clients if needed: `apt-get update && apt-get install -y postgresql-client` or `pip install psycopg2-binary`',
 +  '- You can also SSH into the DB server and run queries there',
 +  '- Use DB access to: verify data integrity, check schema, validate that the code matches the DB state',
@@ -51,7 +61,7 @@ index 8538858..39210dc 100644
  const buildFeatureAnalysisPrompt = (runState) => {
    const artifacts = runState.record.builderArtifacts || {};
    const commitLogSummary = (artifacts.commitLog || [])
-@@ -232,15 +274,18 @@ const buildFeatureAnalysisPrompt = (runState) => {
+@@ -232,15 +284,19 @@ const buildFeatureAnalysisPrompt = (runState) => {
      '## Commit Log (changes made by builder)',
      commitLogSummary,
      '',
@@ -66,17 +76,18 @@ index 8538858..39210dc 100644
 -    '5. Review each changed file for bugs, logic errors, edge cases, security issues.',
 -    '6. Fix any bugs you find. Commit each fix with a clear message.',
 -    '7. If everything passes, report success.',
-+    '2. Set up the project environment (activate venv, install deps if needed).',
-+    '3. Identify all files that were changed.',
-+    '4. Create a test plan with specific scenarios for each changed area.',
-+    '5. Run any existing test suites and report results.',
-+    '6. Review each changed file for bugs, logic errors, edge cases, security issues.',
-+    '7. Fix any bugs you find. Commit each fix with a clear message.',
-+    '8. If everything passes, report success.',
++    '2. Read CLAUDE.md and memory files for project-specific server/DB/deploy info.',
++    '3. Set up the project environment (activate venv, install deps if needed).',
++    '4. Identify all files that were changed.',
++    '5. Create a test plan with specific scenarios for each changed area.',
++    '6. Run any existing test suites and report results.',
++    '7. Review each changed file for bugs, logic errors, edge cases, security issues.',
++    '8. Fix any bugs you find. Commit each fix with a clear message.',
++    '9. If everything passes, report success.',
      '',
      buildStateUpdateInstructions(runState),
    ].filter(Boolean).join('\n');
-@@ -252,14 +297,17 @@ const buildGeneralDiscoveryPrompt = (runState) => [
+@@ -252,14 +308,18 @@ const buildGeneralDiscoveryPrompt = (runState) => [
    `Project root: ${runState.record.projectPath}`,
    `Mode: general (whole-project review)`,
    '',
@@ -84,22 +95,24 @@ index 8538858..39210dc 100644
 +  '',
    '## Your Task',
    '',
-   '1. Scan the project structure to understand the architecture.',
+-  '1. Scan the project structure to understand the architecture.',
 -  '2. Identify all source files, test files, configs, and entry points.',
 -  '3. Run existing test suites (npm test, etc.) and collect results.',
 -  '4. Review source code systematically for bugs, logic errors, security issues, performance problems.',
 -  '5. Fix the most critical issues. Commit each fix with a clear message.',
 -  '6. If you need to deploy to verify fixes, signal for deployment.',
-+  '2. Set up the project environment (find and activate venv, install deps if needed).',
-+  '3. Identify all source files, test files, configs, and entry points.',
-+  '4. Run existing test suites and collect results.',
-+  '5. Review source code systematically for bugs, logic errors, security issues, performance problems.',
-+  '6. Fix the most critical issues. Commit each fix with a clear message.',
-+  '7. If you need to deploy to verify fixes, signal for deployment.',
++  '1. Read CLAUDE.md and memory files for project-specific server/DB/deploy info.',
++  '2. Scan the project structure to understand the architecture.',
++  '3. Set up the project environment (find and activate venv, install deps if needed).',
++  '4. Identify all source files, test files, configs, and entry points.',
++  '5. Run existing test suites and collect results.',
++  '6. Review source code systematically for bugs, logic errors, security issues, performance problems.',
++  '7. Fix the most critical issues. Commit each fix with a clear message.',
++  '8. If you need to deploy to verify fixes, signal for deployment.',
    '',
    buildStateUpdateInstructions(runState),
  ].join('\n');
-@@ -278,6 +326,8 @@ const buildContinuationPrompt = (runState) => {
+@@ -278,6 +338,8 @@ const buildContinuationPrompt = (runState) => {
      `Mode: ${record.mode}`,
      `Session number: ${record.sessionCount}`,
      '',

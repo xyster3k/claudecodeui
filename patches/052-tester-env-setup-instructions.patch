@@ -1,0 +1,91 @@
+diff --git a/server/tester-mode.js b/server/tester-mode.js
+index 8538858..9971475 100644
+--- a/server/tester-mode.js
++++ b/server/tester-mode.js
+@@ -207,6 +207,29 @@ const loadBuilderArtifacts = async (projectPath, builderRunId) => {
+ 
+ // ---- Prompt Building ----
+ 
++const ENVIRONMENT_SETUP_INSTRUCTIONS = [
++  '## Environment & Shell Access',
++  '',
++  'You have FULL shell access with all permissions bypassed. Use it aggressively.',
++  '',
++  '**Before running tests or any project commands:**',
++  '1. Discover the project runtime environment:',
++  '   - Python: look for `venv/`, `.venv/`, `env/`, `pyproject.toml`, `requirements.txt`, `Pipfile`, `setup.py`',
++  '   - Node.js: look for `node_modules/`, `package.json`, `yarn.lock`, `pnpm-lock.yaml`',
++  '   - Other: `Makefile`, `docker-compose.yml`, `Cargo.toml`, `go.mod`',
++  '2. **Activate the virtual environment** if one exists:',
++  '   - `source venv/bin/activate` or `source .venv/bin/activate`',
++  '   - Or use the venv Python directly: `./venv/bin/python -m pytest`',
++  '3. If test dependencies are missing, **install them**: `pip install pytest`, `npm install`, etc.',
++  '4. Find the correct test command: `npm test`, `pytest`, `python -m pytest`, `make test`, `cargo test`, etc.',
++  '',
++  '**NEVER report "cannot run tests" without trying these steps first.**',
++  'If the system Python lacks packages, find or create a virtualenv.',
++  'If pytest is missing, install it. If node_modules is missing, run npm install.',
++  'You have full authority to install packages and run any command.',
++  '',
++].join('\n');
++
+ const buildFeatureAnalysisPrompt = (runState) => {
+   const artifacts = runState.record.builderArtifacts || {};
+   const commitLogSummary = (artifacts.commitLog || [])
+@@ -232,15 +255,18 @@ const buildFeatureAnalysisPrompt = (runState) => {
+     '## Commit Log (changes made by builder)',
+     commitLogSummary,
+     '',
++    ENVIRONMENT_SETUP_INSTRUCTIONS,
++    '',
+     '## Your Task',
+     '',
+     '1. Read the builder artifacts (PRD, plan, commit log) to understand what was built.',
+-    '2. Identify all files that were changed.',
+-    '3. Create a test plan with specific scenarios for each changed area.',
+-    '4. Run any existing test suites (npm test, etc.) and report results.',
+-    '5. Review each changed file for bugs, logic errors, edge cases, security issues.',
+-    '6. Fix any bugs you find. Commit each fix with a clear message.',
+-    '7. If everything passes, report success.',
++    '2. Set up the project environment (activate venv, install deps if needed).',
++    '3. Identify all files that were changed.',
++    '4. Create a test plan with specific scenarios for each changed area.',
++    '5. Run any existing test suites and report results.',
++    '6. Review each changed file for bugs, logic errors, edge cases, security issues.',
++    '7. Fix any bugs you find. Commit each fix with a clear message.',
++    '8. If everything passes, report success.',
+     '',
+     buildStateUpdateInstructions(runState),
+   ].filter(Boolean).join('\n');
+@@ -252,14 +278,17 @@ const buildGeneralDiscoveryPrompt = (runState) => [
+   `Project root: ${runState.record.projectPath}`,
+   `Mode: general (whole-project review)`,
+   '',
++  ENVIRONMENT_SETUP_INSTRUCTIONS,
++  '',
+   '## Your Task',
+   '',
+   '1. Scan the project structure to understand the architecture.',
+-  '2. Identify all source files, test files, configs, and entry points.',
+-  '3. Run existing test suites (npm test, etc.) and collect results.',
+-  '4. Review source code systematically for bugs, logic errors, security issues, performance problems.',
+-  '5. Fix the most critical issues. Commit each fix with a clear message.',
+-  '6. If you need to deploy to verify fixes, signal for deployment.',
++  '2. Set up the project environment (find and activate venv, install deps if needed).',
++  '3. Identify all source files, test files, configs, and entry points.',
++  '4. Run existing test suites and collect results.',
++  '5. Review source code systematically for bugs, logic errors, security issues, performance problems.',
++  '6. Fix the most critical issues. Commit each fix with a clear message.',
++  '7. If you need to deploy to verify fixes, signal for deployment.',
+   '',
+   buildStateUpdateInstructions(runState),
+ ].join('\n');
+@@ -278,6 +307,8 @@ const buildContinuationPrompt = (runState) => {
+     `Mode: ${record.mode}`,
+     `Session number: ${record.sessionCount}`,
+     '',
++    ENVIRONMENT_SETUP_INSTRUCTIONS,
++    '',
+     '## Previous Session Summary',
+     record.sessionSummary || 'No summary from previous session.',
+     '',

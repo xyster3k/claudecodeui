@@ -1,17 +1,19 @@
 diff --git a/server/tester-mode.js b/server/tester-mode.js
-index 8538858..9971475 100644
+index 8538858..39210dc 100644
 --- a/server/tester-mode.js
 +++ b/server/tester-mode.js
-@@ -207,6 +207,29 @@ const loadBuilderArtifacts = async (projectPath, builderRunId) => {
+@@ -207,6 +207,48 @@ const loadBuilderArtifacts = async (projectPath, builderRunId) => {
  
  // ---- Prompt Building ----
  
 +const ENVIRONMENT_SETUP_INSTRUCTIONS = [
-+  '## Environment & Shell Access',
++  '## Environment & Full System Access',
 +  '',
 +  'You have FULL shell access with all permissions bypassed. Use it aggressively.',
++  'You can run ANY command, install ANY package, SSH into remote servers, query databases, read logs — whatever is needed.',
 +  '',
-+  '**Before running tests or any project commands:**',
++  '### Project Runtime Environment',
++  'Before running tests or any project commands:',
 +  '1. Discover the project runtime environment:',
 +  '   - Python: look for `venv/`, `.venv/`, `env/`, `pyproject.toml`, `requirements.txt`, `Pipfile`, `setup.py`',
 +  '   - Node.js: look for `node_modules/`, `package.json`, `yarn.lock`, `pnpm-lock.yaml`',
@@ -19,20 +21,37 @@ index 8538858..9971475 100644
 +  '2. **Activate the virtual environment** if one exists:',
 +  '   - `source venv/bin/activate` or `source .venv/bin/activate`',
 +  '   - Or use the venv Python directly: `./venv/bin/python -m pytest`',
-+  '3. If test dependencies are missing, **install them**: `pip install pytest`, `npm install`, etc.',
++  '3. If dependencies are missing, **install them all**: `pip install -r requirements.txt`, `npm install`, etc.',
++  '   - Install test frameworks too if missing: `pip install pytest`, etc.',
++  '   - If there is no venv, create one: `python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt`',
 +  '4. Find the correct test command: `npm test`, `pytest`, `python -m pytest`, `make test`, `cargo test`, etc.',
 +  '',
-+  '**NEVER report "cannot run tests" without trying these steps first.**',
-+  'If the system Python lacks packages, find or create a virtualenv.',
-+  'If pytest is missing, install it. If node_modules is missing, run npm install.',
-+  'You have full authority to install packages and run any command.',
++  '### Remote Server Access (SSH)',
++  'You can SSH into remote servers to check logs, verify deployments, or inspect running services.',
++  '- SSH keys are at `~/.ssh/` — check `~/.ssh/config` for configured hosts',
++  '- Look in the project for server addresses: `.env`, `config.py`, `deploy.sh`, `Makefile`, `docker-compose.yml`, README',
++  '- Common patterns: `ssh -i ~/.ssh/id_ed25519_deploy user@host`, or use Host aliases from ssh config',
++  '- Use SSH to: tail logs, check process status, verify endpoints, inspect config on the server',
++  '',
++  '### Database Access',
++  '- Look for database connection strings in: `.env`, `config.py`, `settings.py`, `database.yml`, `docker-compose.yml`',
++  '- Install DB clients if needed: `apt-get update && apt-get install -y postgresql-client` or `pip install psycopg2-binary`',
++  '- You can also SSH into the DB server and run queries there',
++  '- Use DB access to: verify data integrity, check schema, validate that the code matches the DB state',
++  '',
++  '### Rules',
++  '**NEVER report "cannot run tests" or "cannot access X" without exhausting all options first.**',
++  'If the system Python lacks packages — find or create a virtualenv and install everything.',
++  'If a DB client is missing — install it or SSH to the server that has it.',
++  'If you need to check server logs — SSH in and read them.',
++  'You have full authority to install packages, create environments, and access any system.',
 +  '',
 +].join('\n');
 +
  const buildFeatureAnalysisPrompt = (runState) => {
    const artifacts = runState.record.builderArtifacts || {};
    const commitLogSummary = (artifacts.commitLog || [])
-@@ -232,15 +255,18 @@ const buildFeatureAnalysisPrompt = (runState) => {
+@@ -232,15 +274,18 @@ const buildFeatureAnalysisPrompt = (runState) => {
      '## Commit Log (changes made by builder)',
      commitLogSummary,
      '',
@@ -57,7 +76,7 @@ index 8538858..9971475 100644
      '',
      buildStateUpdateInstructions(runState),
    ].filter(Boolean).join('\n');
-@@ -252,14 +278,17 @@ const buildGeneralDiscoveryPrompt = (runState) => [
+@@ -252,14 +297,17 @@ const buildGeneralDiscoveryPrompt = (runState) => [
    `Project root: ${runState.record.projectPath}`,
    `Mode: general (whole-project review)`,
    '',
@@ -80,7 +99,7 @@ index 8538858..9971475 100644
    '',
    buildStateUpdateInstructions(runState),
  ].join('\n');
-@@ -278,6 +307,8 @@ const buildContinuationPrompt = (runState) => {
+@@ -278,6 +326,8 @@ const buildContinuationPrompt = (runState) => {
      `Mode: ${record.mode}`,
      `Session number: ${record.sessionCount}`,
      '',

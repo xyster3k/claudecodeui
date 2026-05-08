@@ -46,9 +46,10 @@ RUN npm install -g --omit=dev \
 # Wired at /etc/gitconfig so CloudCLI's UI (which writes ~/.gitconfig) cannot clobber it.
 COPY extras/cloudcli-git-credential /usr/local/bin/cloudcli-git-credential
 COPY extras/cloudcli-project /usr/local/bin/cloudcli-project
+COPY extras/cloudcli-tester-orchestrator.js /usr/local/bin/cloudcli-tester-orchestrator.js
 COPY extras/etc-gitconfig /etc/gitconfig
 RUN chmod +x /usr/local/bin/cloudcli-git-credential /usr/local/bin/cloudcli-project \
- && chmod 644 /etc/gitconfig
+ && chmod 644 /etc/gitconfig /usr/local/bin/cloudcli-tester-orchestrator.js
 
 WORKDIR /app
 COPY --from=builder /build/package.json /build/package-lock.json ./

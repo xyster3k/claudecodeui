@@ -1,0 +1,673 @@
+diff --git a/server/tester-mode.js b/server/tester-mode.js
+new file mode 100644
+index 0000000..8538858
+--- /dev/null
++++ b/server/tester-mode.js
+@@ -0,0 +1,667 @@
++import { randomUUID } from 'node:crypto';
++import { promises as fs } from 'node:fs';
++import path from 'node:path';
++import { execFile as execFileCb } from 'node:child_process';
++
++import { createNormalizedMessage } from './shared/utils.js';
++import { queryClaudeSDK } from './claude-sdk.js';
++import { spawnCursor } from './cursor-cli.js';
++import { queryCodex } from './openai-codex.js';
++import { spawnGemini } from './gemini-cli.js';
++import { providerAuthService } from './modules/providers/services/provider-auth.service.js';
++
++const TESTER_ARTIFACT_DIR = '.cloudcli/tester-runs';
++const BUILDER_ARTIFACT_DIR = '.cloudcli/builder-runs';
++
++const TESTER_STATUSES = {
++  running: 'running',
++  waitingDeploy: 'waiting_deploy',
++  waitingProcess: 'waiting_process',
++  paused: 'paused',
++  completed: 'completed',
++  failed: 'failed',
++};
++
++const TESTER_FEATURE_STAGES = [
++  { id: 'analysis', title: 'Codebase analysis and test plan creation' },
++  { id: 'test_execution', title: 'Run existing test suites' },
++  { id: 'bug_fixing', title: 'Fix discovered bugs' },
++  { id: 'logic_review', title: 'Evaluate logic correctness' },
++  { id: 'regression_check', title: 'Regression testing after fixes' },
++  { id: 'deploy_verification', title: 'Verify deployment' },
++];
++
++const TESTER_GENERAL_STAGES = [
++  { id: 'discovery', title: 'Project scan and inventory' },
++  { id: 'test_suite_execution', title: 'Run test suites' },
++  { id: 'systematic_review', title: 'Systematic code review' },
++  { id: 'fix_prioritized_bugs', title: 'Fix prioritized bugs' },
++  { id: 'regression_check', title: 'Regression testing after fixes' },
++  { id: 'deploy_verification', title: 'Verify deployment' },
++];
++
++const PROVIDER_RUNNERS = {
++  claude: queryClaudeSDK,
++  cursor: spawnCursor,
++  codex: queryCodex,
++  gemini: spawnGemini,
++};
++
++const REASONING_PREFIXES = {
++  low: 'think',
++  medium: 'think hard',
++  high: 'think harder',
++  max: 'ultrathink',
++};
++
++const activeTesterRuns = new Map();
++
++// ---- Helpers ----
++
++const readString = (value) => (typeof value === 'string' ? value : '');
++
++const sanitizeFileName = (name) => String(name || '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 200);
++
++const writeJsonFile = async (filePath, value) => {
++  const tmpPath = `${filePath}.tmp.${randomUUID().slice(0, 8)}`;
++  await fs.writeFile(tmpPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
++  await fs.rename(tmpPath, filePath);
++};
++
++const sendNormalized = (writer, fields) => {
++  writer.send(createNormalizedMessage(fields));
++};
++
++const sendAssistantText = (writer, sessionId, provider, content) => {
++  sendNormalized(writer, { kind: 'text', role: 'assistant', sessionId, provider, content });
++};
++
++const sendTaskUpdate = (writer, sessionId, provider, summary, status) => {
++  sendNormalized(writer, { kind: 'task_notification', sessionId, provider, summary, status });
++};
++
++const createMutexQueue = () => {
++  let pending = Promise.resolve();
++  return (fn) => {
++    const next = pending.then(fn, fn);
++    pending = next.catch(() => {});
++    return next;
++  };
++};
++
++// ---- State Management ----
++
++const createTesterRunRecord = ({ testerId, mode, projectPath, provider, builderRunId, config, command }) => {
++  const timestamp = new Date().toISOString();
++  const stageTemplates = mode === 'feature' ? TESTER_FEATURE_STAGES : TESTER_GENERAL_STAGES;
++  return {
++    testerId,
++    mode,
++    projectPath,
++    provider,
++    command: command || '',
++    builderRunId: builderRunId || null,
++    builderArtifacts: null,
++
++    status: TESTER_STATUSES.running,
++    needsDeploy: false,
++    deployedAt: null,
++    lastDeployCommit: null,
++
++    currentStage: stageTemplates[0].id,
++    completedStages: [],
++    currentSessionId: null,
++    sessionCount: 0,
++    sessionSummary: '',
++    nextAction: '',
++
++    stages: stageTemplates.map((s) => ({
++      id: s.id,
++      title: s.title,
++      status: 'pending',
++      summary: '',
++      findings: [],
++      fixedFiles: [],
++      commitSha: null,
++    })),
++
++    createdAt: timestamp,
++    updatedAt: timestamp,
++    config: config || {},
++    logPath: '',
++
++    metrics: {
++      totalBugsFound: 0,
++      bugsFixed: 0,
++      testsRun: 0,
++      testsPassed: 0,
++      testsFailed: 0,
++      stagesCompleted: 0,
++      stagesTotal: stageTemplates.length,
++      sessionsUsed: 0,
++      deploysTriggered: 0,
++    },
++
++    lastEvent: '',
++    errorMessage: '',
++  };
++};
++
++const ensureTesterDirectories = async (projectPath) => {
++  await fs.mkdir(path.join(projectPath, TESTER_ARTIFACT_DIR), { recursive: true });
++  await fs.mkdir(path.join(projectPath, TESTER_ARTIFACT_DIR, 'logs'), { recursive: true });
++};
++
++const persistTesterRunState = async (runState) => {
++  if (!runState?.record || !runState?.paths) return;
++  await runState.persistenceQueue(async () => {
++    runState.record.updatedAt = new Date().toISOString();
++    await writeJsonFile(runState.paths.runPath, runState.record);
++    await writeJsonFile(runState.paths.latestPath, runState.record);
++  });
++};
++
++const appendTesterRunEvent = async (runState, event) => {
++  if (!runState?.paths?.logPath) return;
++  await runState.persistenceQueue(async () => {
++    const entry = {
++      ts: new Date().toISOString(),
++      testerId: runState.record?.testerId || '',
++      provider: runState.record?.provider || '',
++      status: runState.record?.status || 'running',
++      currentStage: runState.record?.currentStage || '',
++      ...event,
++    };
++    await fs.appendFile(runState.paths.logPath, `${JSON.stringify(entry)}\n`, 'utf8');
++  });
++};
++
++// ---- Builder Artifact Loading ----
++
++const loadBuilderArtifacts = async (projectPath, builderRunId) => {
++  try {
++    let runRecordPath;
++    if (builderRunId) {
++      runRecordPath = path.join(projectPath, BUILDER_ARTIFACT_DIR, `${sanitizeFileName(builderRunId)}.json`);
++    } else {
++      runRecordPath = path.join(projectPath, BUILDER_ARTIFACT_DIR, 'latest-run.json');
++    }
++    const raw = await fs.readFile(runRecordPath, 'utf8');
++    const runRecord = JSON.parse(raw);
++    return {
++      sessionId: runRecord.sessionId || '',
++      requestPath: runRecord.requestPath || '',
++      prdPath: runRecord.prdPath || '',
++      planPath: runRecord.planPath || '',
++      planReviewPath: runRecord.planReviewPath || '',
++      qaBundlePath: runRecord.qaBundlePath || '',
++      tasksPath: runRecord.tasksPath || '',
++      commitLog: Array.isArray(runRecord.commitLog) ? runRecord.commitLog : [],
++      tasks: Array.isArray(runRecord.tasks) ? runRecord.tasks : [],
++      command: runRecord.command || '',
++    };
++  } catch {
++    return null;
++  }
++};
++
++// ---- Prompt Building ----
++
++const buildFeatureAnalysisPrompt = (runState) => {
++  const artifacts = runState.record.builderArtifacts || {};
++  const commitLogSummary = (artifacts.commitLog || [])
++    .map((entry) => `- [${entry.stage}${entry.taskId ? ` task ${entry.taskId}` : ''}] ${entry.sha?.slice(0, 8) || '?'}: ${entry.message || 'no message'} (${(entry.files || []).length} files)`)
++    .join('\n') || 'No commits recorded.';
++
++  return [
++    'You are a Tester Pipeline session. Your job is to thoroughly test a recently built feature, find bugs and logic issues, and fix them.',
++    '',
++    `Project root: ${runState.record.projectPath}`,
++    `Mode: feature`,
++    `Builder run: ${artifacts.sessionId || 'unknown'}`,
++    '',
++    '## Builder Artifacts',
++    '',
++    artifacts.requestPath ? `User request: \`${artifacts.requestPath}\`` : '',
++    artifacts.prdPath ? `PRD: \`${artifacts.prdPath}\`` : '',
++    artifacts.planPath ? `Execution plan: \`${artifacts.planPath}\`` : '',
++    artifacts.planReviewPath ? `Plan coverage review: \`${artifacts.planReviewPath}\`` : '',
++    artifacts.qaBundlePath ? `QA bundle: \`${artifacts.qaBundlePath}\`` : '',
++    artifacts.tasksPath ? `Tasks: \`${artifacts.tasksPath}\`` : '',
++    '',
++    '## Commit Log (changes made by builder)',
++    commitLogSummary,
++    '',
++    '## Your Task',
++    '',
++    '1. Read the builder artifacts (PRD, plan, commit log) to understand what was built.',
++    '2. Identify all files that were changed.',
++    '3. Create a test plan with specific scenarios for each changed area.',
++    '4. Run any existing test suites (npm test, etc.) and report results.',
++    '5. Review each changed file for bugs, logic errors, edge cases, security issues.',
++    '6. Fix any bugs you find. Commit each fix with a clear message.',
++    '7. If everything passes, report success.',
++    '',
++    buildStateUpdateInstructions(runState),
++  ].filter(Boolean).join('\n');
++};
++
++const buildGeneralDiscoveryPrompt = (runState) => [
++  'You are a Tester Pipeline session. Your job is to systematically review the entire project for bugs, logic errors, and issues.',
++  '',
++  `Project root: ${runState.record.projectPath}`,
++  `Mode: general (whole-project review)`,
++  '',
++  '## Your Task',
++  '',
++  '1. Scan the project structure to understand the architecture.',
++  '2. Identify all source files, test files, configs, and entry points.',
++  '3. Run existing test suites (npm test, etc.) and collect results.',
++  '4. Review source code systematically for bugs, logic errors, security issues, performance problems.',
++  '5. Fix the most critical issues. Commit each fix with a clear message.',
++  '6. If you need to deploy to verify fixes, signal for deployment.',
++  '',
++  buildStateUpdateInstructions(runState),
++].join('\n');
++
++const buildContinuationPrompt = (runState) => {
++  const record = runState.record;
++  const remainingStages = (record.stages || [])
++    .filter((s) => s.status !== 'completed')
++    .map((s) => `- ${s.id}: ${s.title} (${s.status})`)
++    .join('\n') || 'No stages remaining.';
++
++  return [
++    'You are continuing a Tester Pipeline session. Pick up where the previous session left off.',
++    '',
++    `Project root: ${record.projectPath}`,
++    `Mode: ${record.mode}`,
++    `Session number: ${record.sessionCount}`,
++    '',
++    '## Previous Session Summary',
++    record.sessionSummary || 'No summary from previous session.',
++    '',
++    '## Your Next Action',
++    record.nextAction || 'Continue from the current stage.',
++    '',
++    '## Current Stage',
++    `Stage: ${record.currentStage}`,
++    `Completed stages: ${(record.completedStages || []).join(', ') || 'none'}`,
++    '',
++    '## Stages Remaining',
++    remainingStages,
++    '',
++    '## Metrics So Far',
++    `Bugs found: ${record.metrics?.totalBugsFound || 0}`,
++    `Bugs fixed: ${record.metrics?.bugsFixed || 0}`,
++    `Tests run: ${record.metrics?.testsRun || 0} (${record.metrics?.testsPassed || 0} passed, ${record.metrics?.testsFailed || 0} failed)`,
++    '',
++    buildStateUpdateInstructions(runState),
++  ].join('\n');
++};
++
++const buildStateUpdateInstructions = (runState) => {
++  const stateFilePath = runState.paths.runPath;
++  return [
++    '## CRITICAL: State Update Protocol',
++    '',
++    `Before you finish, you MUST update the tester state file at:`,
++    `  ${stateFilePath}`,
++    '',
++    'Read the file first, then update these JSON fields:',
++    '- "sessionSummary": Describe what you accomplished in this session',
++    '- "nextAction": Describe what the next session should do',
++    '- "currentStage": The stage you are currently on (one of the stage IDs)',
++    '- "completedStages": Array of completed stage IDs',
++    '- "status": One of "running", "waiting_deploy", "waiting_process", "completed", "failed"',
++    '- "needsDeploy": true if you committed changes that need deployment',
++    '- Update the "stages" array — set each stage\'s "status" to "completed", "in_progress", or "pending"',
++    '- Update the "stages" array — fill in "summary" and "findings" arrays for completed stages',
++    '- Update "metrics" with counts of bugs found/fixed, tests run/passed/failed',
++    '',
++    'Status values:',
++    '- "running" — you are still working (only set this if you are mid-stage)',
++    '- "waiting_deploy" — you committed fixes and need a deploy before continuing. Set needsDeploy=true.',
++    '- "waiting_process" — you started a long process and need to wait for it',
++    '- "completed" — ALL stages are done, pipeline is finished',
++    '- "failed" — unrecoverable error, pipeline should stop',
++    '',
++    'IMPORTANT: Always write your sessionSummary and nextAction before finishing.',
++    'IMPORTANT: Use proper JSON when editing the state file. Read it first, modify, then write back.',
++  ].join('\n');
++};
++
++// ---- Session Execution ----
++
++class TesterBufferedWriter {
++  constructor(sessionId, provider) {
++    this.sessionId = sessionId;
++    this.provider = provider;
++    this.textChunks = [];
++    this.errors = [];
++    this.isWebSocketWriter = true;
++  }
++
++  send(message) {
++    let msg = message;
++    if (typeof msg === 'string') {
++      try { msg = JSON.parse(msg); } catch { msg = { kind: 'text', content: msg }; }
++    }
++    if (typeof msg?.content === 'string' && (msg.kind === 'text' || msg.kind === 'stream_delta')) {
++      this.textChunks.push(msg.content);
++    }
++    if (typeof msg?.content === 'string' && msg.kind === 'error') {
++      this.errors.push(msg.content);
++    }
++  }
++
++  getSessionId() { return this.sessionId; }
++  getSummary() { return { text: this.textChunks.join('\n').trim(), errors: [...this.errors] }; }
++}
++
++const executeTesterSession = async (runState, writer, provider, options) => {
++  const record = runState.record;
++  record.sessionCount += 1;
++  record.sessionsUsed = record.sessionCount;
++  record.metrics.sessionsUsed = record.sessionCount;
++  const sessionId = `${record.testerId}-session-${record.sessionCount}`;
++  record.currentSessionId = sessionId;
++  record.status = TESTER_STATUSES.running;
++  await persistTesterRunState(runState);
++  await appendTesterRunEvent(runState, { kind: 'session_started', sessionId, sessionNumber: record.sessionCount });
++
++  // Build prompt based on state
++  let prompt;
++  if (record.sessionCount <= 1) {
++    prompt = record.mode === 'feature'
++      ? buildFeatureAnalysisPrompt(runState)
++      : buildGeneralDiscoveryPrompt(runState);
++  } else {
++    prompt = buildContinuationPrompt(runState);
++  }
++
++  // Apply reasoning prefix
++  const reasoningLevel = record.config?.reasoningLevel || 'high';
++  const prefix = REASONING_PREFIXES[reasoningLevel] || REASONING_PREFIXES.high;
++  const fullPrompt = `${prefix}\n\n${prompt}`;
++
++  const runner = PROVIDER_RUNNERS[provider] || queryClaudeSDK;
++  const bufWriter = new TesterBufferedWriter(sessionId, provider);
++
++  sendTaskUpdate(writer, record.testerId, provider,
++    `Tester session ${record.sessionCount} started (stage: ${record.currentStage})`, 'in_progress');
++
++  try {
++    await runner(fullPrompt, {
++      ...options,
++      cwd: record.projectPath,
++      projectPath: record.projectPath,
++      workflowMode: 'chat',
++      permissionMode: options.permissionMode || 'bypassPermissions',
++    }, bufWriter);
++  } catch (err) {
++    await appendTesterRunEvent(runState, { kind: 'session_error', sessionId, error: err.message });
++    sendAssistantText(writer, record.testerId, provider, `### Tester session error\n${err.message}`);
++  }
++
++  // After session ends, re-read the state file (LLM may have updated it)
++  try {
++    const updatedRaw = await fs.readFile(runState.paths.runPath, 'utf8');
++    const updatedRecord = JSON.parse(updatedRaw);
++    // Merge LLM-written fields into our record
++    if (updatedRecord.testerId === record.testerId) {
++      record.sessionSummary = readString(updatedRecord.sessionSummary) || record.sessionSummary;
++      record.nextAction = readString(updatedRecord.nextAction) || record.nextAction;
++      record.currentStage = readString(updatedRecord.currentStage) || record.currentStage;
++      record.completedStages = Array.isArray(updatedRecord.completedStages) ? updatedRecord.completedStages : record.completedStages;
++      record.status = readString(updatedRecord.status) || record.status;
++      record.needsDeploy = Boolean(updatedRecord.needsDeploy);
++      if (Array.isArray(updatedRecord.stages)) {
++        record.stages = updatedRecord.stages;
++      }
++      if (updatedRecord.metrics && typeof updatedRecord.metrics === 'object') {
++        Object.assign(record.metrics, updatedRecord.metrics);
++      }
++      record.metrics.sessionsUsed = record.sessionCount;
++      record.metrics.stagesCompleted = (record.completedStages || []).length;
++    }
++  } catch {
++    // LLM didn't update the state file — mark as needing continuation
++    if (record.status === TESTER_STATUSES.running) {
++      record.sessionSummary = record.sessionSummary || 'Session ended without updating state file.';
++      record.nextAction = record.nextAction || 'Re-read the state file and continue from the current stage.';
++    }
++  }
++
++  record.currentSessionId = null;
++  await persistTesterRunState(runState);
++  await appendTesterRunEvent(runState, {
++    kind: 'session_completed',
++    sessionId,
++    sessionNumber: record.sessionCount,
++    status: record.status,
++    currentStage: record.currentStage,
++    summary: record.sessionSummary,
++  });
++
++  const sessionSummary = bufWriter.getSummary();
++  if (sessionSummary.text) {
++    sendAssistantText(writer, record.testerId, provider,
++      `### Tester session ${record.sessionCount} output\n${sessionSummary.text.slice(0, 2000)}`);
++  }
++
++  // Report final state to the user
++  const statusMsg = record.status === TESTER_STATUSES.completed
++    ? 'Tester pipeline completed successfully'
++    : record.status === TESTER_STATUSES.failed
++      ? `Tester pipeline failed: ${record.errorMessage || record.sessionSummary}`
++      : record.status === TESTER_STATUSES.waitingDeploy
++        ? 'Tester pipeline waiting for deployment'
++        : record.status === TESTER_STATUSES.waitingProcess
++          ? 'Tester pipeline waiting for process to complete'
++          : `Tester session ${record.sessionCount} completed (status: ${record.status})`;
++
++  sendTaskUpdate(writer, record.testerId, provider, statusMsg,
++    record.status === TESTER_STATUSES.completed ? 'completed'
++      : record.status === TESTER_STATUSES.failed ? 'failed'
++        : 'in_progress');
++
++  sendNormalized(writer, {
++    kind: 'complete',
++    sessionId: record.testerId,
++    provider,
++    success: record.status === TESTER_STATUSES.completed,
++    exitCode: record.status === TESTER_STATUSES.failed ? 1 : 0,
++  });
++};
++
++// ---- Public API ----
++
++export async function startTesterPipeline(command, options = {}, writer, provider = 'claude') {
++  const testerId = `tester-${randomUUID()}`;
++  const projectPath = options.projectPath || options.cwd || process.cwd();
++  const builderRunId = readString(options.builderRunId) || null;
++  const mode = readString(options.testerMode) || (builderRunId ? 'feature' : 'general');
++
++  // Detect mode from command text
++  const effectiveMode = /\b(test last build|test feature|test the build)\b/i.test(command) ? 'feature' : mode;
++
++  await ensureTesterDirectories(projectPath);
++
++  const runState = {
++    record: createTesterRunRecord({
++      testerId,
++      mode: effectiveMode,
++      projectPath,
++      provider,
++      builderRunId,
++      config: options.testerSettings || {},
++      command,
++    }),
++    paths: {
++      runPath: path.join(projectPath, TESTER_ARTIFACT_DIR, `${sanitizeFileName(testerId)}.json`),
++      latestPath: path.join(projectPath, TESTER_ARTIFACT_DIR, 'latest-run.json'),
++      logPath: path.join(projectPath, TESTER_ARTIFACT_DIR, 'logs', `${sanitizeFileName(testerId)}.ndjson`),
++    },
++    persistenceQueue: createMutexQueue(),
++  };
++
++  runState.record.logPath = runState.paths.logPath;
++  await fs.writeFile(runState.paths.logPath, '', 'utf8');
++
++  // Load builder artifacts if feature mode
++  if (effectiveMode === 'feature') {
++    const artifacts = await loadBuilderArtifacts(projectPath, builderRunId);
++    if (artifacts) {
++      runState.record.builderArtifacts = artifacts;
++      runState.record.builderRunId = artifacts.sessionId || builderRunId;
++    } else {
++      sendAssistantText(writer, testerId, provider,
++        '### Warning\nNo builder run artifacts found. Falling back to general mode.');
++      runState.record.mode = 'general';
++      runState.record.stages = TESTER_GENERAL_STAGES.map((s) => ({
++        id: s.id, title: s.title, status: 'pending', summary: '', findings: [], fixedFiles: [], commitSha: null,
++      }));
++      runState.record.currentStage = TESTER_GENERAL_STAGES[0].id;
++      runState.record.metrics.stagesTotal = TESTER_GENERAL_STAGES.length;
++    }
++  }
++
++  await persistTesterRunState(runState);
++  await appendTesterRunEvent(runState, { kind: 'pipeline_started', mode: runState.record.mode, command });
++  activeTesterRuns.set(testerId, runState);
++
++  sendAssistantText(writer, testerId, provider, [
++    `### Tester Pipeline Started`,
++    `Mode: ${runState.record.mode}`,
++    `Tester ID: ${testerId}`,
++    runState.record.builderArtifacts ? `Builder run: ${runState.record.builderArtifacts.sessionId}` : '',
++    `Stages: ${runState.record.stages.map((s) => s.id).join(' → ')}`,
++    '',
++    `State file: \`${runState.paths.runPath}\``,
++  ].filter(Boolean).join('\n'));
++
++  // Start orchestrator as background process
++  try {
++    const orchestratorPath = '/usr/local/bin/cloudcli-tester-orchestrator.js';
++    await fs.access(orchestratorPath);
++    const { spawn } = await import('node:child_process');
++    const port = process.env.PORT || '3001';
++    const orchestrator = spawn('node', [
++      orchestratorPath,
++      '--tester-id', testerId,
++      '--project', projectPath,
++      '--poll', String(runState.record.config?.orchestrator?.pollIntervalSeconds || 300),
++      '--deploy-wait', String(runState.record.config?.orchestrator?.deployWaitSeconds || 120),
++    ], {
++      detached: true,
++      stdio: 'ignore',
++      env: {
++        ...process.env,
++        CLOUDCLI_URL: `http://localhost:${port}`,
++      },
++    });
++    orchestrator.unref();
++    runState.orchestratorPid = orchestrator.pid;
++    await appendTesterRunEvent(runState, { kind: 'orchestrator_started', pid: orchestrator.pid });
++  } catch {
++    // Orchestrator script not available (dev environment). User must manage sessions manually.
++    await appendTesterRunEvent(runState, { kind: 'orchestrator_unavailable', summary: 'Orchestrator script not found. Manual session management required.' });
++  }
++
++  await executeTesterSession(runState, writer, provider, options);
++
++  // After session ends, clean up if completed or failed
++  if (runState.record.status === TESTER_STATUSES.completed || runState.record.status === TESTER_STATUSES.failed) {
++    activeTesterRuns.delete(testerId);
++  }
++}
++
++export async function continueTesterPipeline(testerId, options = {}, writer, provider = 'claude') {
++  const projectPath = options.projectPath || options.cwd || process.cwd();
++  const statePath = path.join(projectPath, TESTER_ARTIFACT_DIR, `${sanitizeFileName(testerId)}.json`);
++
++  let record;
++  try {
++    const raw = await fs.readFile(statePath, 'utf8');
++    record = JSON.parse(raw);
++  } catch (err) {
++    sendAssistantText(writer, testerId, provider, `### Error\nCould not read tester state: ${err.message}`);
++    sendNormalized(writer, { kind: 'complete', sessionId: testerId, provider, success: false, exitCode: 1 });
++    return;
++  }
++
++  if (record.status === TESTER_STATUSES.completed || record.status === TESTER_STATUSES.failed) {
++    sendAssistantText(writer, testerId, provider,
++      `### Tester pipeline already ${record.status}\n${record.sessionSummary || ''}`);
++    sendNormalized(writer, { kind: 'complete', sessionId: testerId, provider, success: record.status === TESTER_STATUSES.completed, exitCode: 0 });
++    return;
++  }
++
++  const maxSessions = record.config?.maxSessionsPerRun || 10;
++  if (record.sessionCount >= maxSessions) {
++    record.status = TESTER_STATUSES.failed;
++    record.errorMessage = `Max session limit reached (${maxSessions})`;
++    await writeJsonFile(statePath, record);
++    sendAssistantText(writer, testerId, provider, `### Error\nMax session limit reached (${maxSessions})`);
++    sendNormalized(writer, { kind: 'complete', sessionId: testerId, provider, success: false, exitCode: 1 });
++    return;
++  }
++
++  const runState = {
++    record,
++    paths: {
++      runPath: statePath,
++      latestPath: path.join(projectPath, TESTER_ARTIFACT_DIR, 'latest-run.json'),
++      logPath: record.logPath || path.join(projectPath, TESTER_ARTIFACT_DIR, 'logs', `${sanitizeFileName(testerId)}.ndjson`),
++    },
++    persistenceQueue: createMutexQueue(),
++  };
++
++  activeTesterRuns.set(testerId, runState);
++
++  await executeTesterSession(runState, writer, provider, options);
++
++  if (runState.record.status === TESTER_STATUSES.completed || runState.record.status === TESTER_STATUSES.failed) {
++    activeTesterRuns.delete(testerId);
++  }
++}
++
++export async function abortTesterPipeline(testerId) {
++  const runState = activeTesterRuns.get(testerId);
++  if (!runState) return false;
++
++  runState.record.status = TESTER_STATUSES.failed;
++  runState.record.errorMessage = 'Pipeline aborted by user';
++  runState.record.sessionSummary = `Aborted during session ${runState.record.sessionCount}`;
++  await persistTesterRunState(runState);
++  await appendTesterRunEvent(runState, { kind: 'pipeline_aborted' });
++
++  // Kill orchestrator if running
++  if (runState.orchestratorPid) {
++    try { process.kill(runState.orchestratorPid, 'SIGTERM'); } catch { /* already dead */ }
++  }
++
++  activeTesterRuns.delete(testerId);
++  return true;
++}
++
++export function getActiveTesterRuns() {
++  return [...activeTesterRuns.entries()].map(([testerId, runState]) => ({
++    testerId,
++    provider: runState.record.provider,
++    command: runState.record.command,
++    mode: runState.record.mode,
++    status: runState.record.status,
++    currentStage: runState.record.currentStage,
++    sessionCount: runState.record.sessionCount,
++    metrics: runState.record.metrics,
++    createdAt: runState.record.createdAt,
++    projectPath: runState.record.projectPath,
++  }));
++}
++
++export function getTesterRunState(testerId) {
++  const runState = activeTesterRuns.get(testerId);
++  return runState?.record || null;
++}

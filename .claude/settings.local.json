@@ -19,7 +19,15 @@
       "Read(//tmp/claudecodeui-upstream/server/**)",
       "Read(//private/tmp/claudecodeui-upstream/server/**)",
       "Read(//tmp/claudecodeui-upstream/**)",
-      "Read(//private/tmp/claudecodeui-upstream/**)"
+      "Read(//private/tmp/claudecodeui-upstream/**)",
+      "Read(//tmp/claudecodeui/src/**)",
+      "Read(//private/tmp/claudecodeui/src/**)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:api.github.com)",
+      "Read(//tmp/patch-sim/upstream/src/components/chat/view/**)",
+      "Read(//private/tmp/patch-sim/upstream/src/components/chat/view/**)",
+      "Read(//tmp/patch-sim/upstream/src/components/sidebar/view/subcomponents/**)",
+      "Read(//private/tmp/patch-sim/upstream/src/components/sidebar/view/subcomponents/**)"
     ]
   }
 }

@@ -27,7 +27,13 @@
       "Read(//tmp/patch-sim/upstream/src/components/chat/view/**)",
       "Read(//private/tmp/patch-sim/upstream/src/components/chat/view/**)",
       "Read(//tmp/patch-sim/upstream/src/components/sidebar/view/subcomponents/**)",
-      "Read(//private/tmp/patch-sim/upstream/src/components/sidebar/view/subcomponents/**)"
+      "Read(//private/tmp/patch-sim/upstream/src/components/sidebar/view/subcomponents/**)",
+      "Read(//tmp/ccui-upstream/src/**)",
+      "Read(//private/tmp/ccui-upstream/src/**)",
+      "Read(//tmp/ccui-upstream/server/**)",
+      "Read(//private/tmp/ccui-upstream/server/**)",
+      "Read(//tmp/ccui-upstream/**)",
+      "Read(//private/tmp/ccui-upstream/**)"
     ]
   }
 }

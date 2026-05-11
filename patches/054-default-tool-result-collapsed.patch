@@ -1,0 +1,12 @@
+diff --git a/src/components/chat/tools/configs/toolConfigs.ts b/src/components/chat/tools/configs/toolConfigs.ts
+index 1234567..abcdefg 100644
+--- a/src/components/chat/tools/configs/toolConfigs.ts
++++ b/src/components/chat/tools/configs/toolConfigs.ts
+@@ -539,6 +539,7 @@ export const TOOL_CONFIGS: Record<string, ToolDisplayConfig> = {
+     result: {
+       type: 'collapsible',
+       contentType: 'text',
++      defaultOpen: false,
+       getContentProps: (result) => ({
+         content: String(result?.content || ''),
+         format: 'plain'

@@ -1,0 +1,44 @@
+diff --git a/src/components/git-panel/view/changes/ChangesView.tsx b/src/components/git-panel/view/changes/ChangesView.tsx
+index ddc21e9..3e64d29 100644
+--- a/src/components/git-panel/view/changes/ChangesView.tsx
++++ b/src/components/git-panel/view/changes/ChangesView.tsx
+@@ -1,4 +1,4 @@
+-import { GitBranch, GitCommit, RefreshCw } from 'lucide-react';
++import { GitCommit, RefreshCw } from 'lucide-react';
+ import { useCallback, useEffect, useMemo, useState } from 'react';
+ import type { ConfirmationRequest, FileStatusCode, GitDiffMap, GitStatusResponse } from '../../types/types';
+ import { getAllChangedFiles, hasChangedFiles } from '../../utils/gitPanelUtils';
+@@ -156,33 +156,6 @@ export default function ChangesView({
+           <div className="flex h-32 items-center justify-center">
+             <RefreshCw className="h-5 w-5 animate-spin text-muted-foreground" />
+           </div>
+-        ) : gitStatus?.hasCommits === false ? (
+-          <div className="flex flex-col items-center justify-center p-8 text-center">
+-            <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-muted/50">
+-              <GitBranch className="h-7 w-7 text-muted-foreground/50" />
+-            </div>
+-            <h3 className="mb-2 text-lg font-medium text-foreground">No commits yet</h3>
+-            <p className="mb-6 max-w-md text-sm text-muted-foreground">
+-              This repository doesn&apos;t have any commits yet. Create your first commit to start tracking changes.
+-            </p>
+-            <button
+-              onClick={() => void onCreateInitialCommit()}
+-              disabled={isCreatingInitialCommit}
+-              className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+-            >
+-              {isCreatingInitialCommit ? (
+-                <>
+-                  <RefreshCw className="h-4 w-4 animate-spin" />
+-                  <span>Creating Initial Commit...</span>
+-                </>
+-              ) : (
+-                <>
+-                  <GitCommit className="h-4 w-4" />
+-                  <span>Create Initial Commit</span>
+-                </>
+-              )}
+-            </button>
+-          </div>
+         ) : !gitStatus || !hasChangedFiles(gitStatus) ? (
+           <div className="flex h-32 flex-col items-center justify-center text-muted-foreground">
+             <GitCommit className="mb-2 h-10 w-10 opacity-40" />

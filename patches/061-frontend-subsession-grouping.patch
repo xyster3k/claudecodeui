@@ -1,0 +1,119 @@
+diff --git a/src/components/sidebar/view/subcomponents/SidebarProjectSessions.tsx b/src/components/sidebar/view/subcomponents/SidebarProjectSessions.tsx
+index 1234567..abcdefg 100644
+--- a/src/components/sidebar/view/subcomponents/SidebarProjectSessions.tsx
++++ b/src/components/sidebar/view/subcomponents/SidebarProjectSessions.tsx
+@@ -1,4 +1,5 @@
+-import { ChevronDown, Plus } from 'lucide-react';
++import { useState, useMemo } from 'react';
++import { ChevronDown, ChevronRight, Layers, Plus } from 'lucide-react';
+ import type { TFunction } from 'i18next';
+ import { Button } from '../../../../shared/view/ui';
+ import type { Project, ProjectSession, LLMProvider } from '../../../../types/app';
+@@ -56,6 +57,28 @@ export default function SidebarProjectSessions({
+   onNewSession,
+   t,
+ }: SidebarProjectSessionsProps) {
++  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
++
++  const { standaloneSessions, sessionGroups } = useMemo(() => {
++    const children = sessions.filter((s) => s.parentSessionId);
++    const standalone = sessions.filter((s) => !s.parentSessionId);
++
++    // Group children by parentSessionId
++    const groups = new Map<string, SessionWithProvider[]>();
++    for (const child of children) {
++      const parentId = child.parentSessionId as string;
++      if (!groups.has(parentId)) {
++        groups.set(parentId, []);
++      }
++      groups.get(parentId)!.push(child);
++    }
++
++    return { standaloneSessions: standalone, sessionGroups: groups };
++  }, [sessions]);
++
++  const toggleGroup = (parentId: string) => {
++    setExpandedGroups((prev) => {
++      const next = new Set(prev);
++      if (next.has(parentId)) {
++        next.delete(parentId);
++      } else {
++        next.add(parentId);
++      }
++      return next;
++    });
++  };
++
+   if (!isExpanded) {
+     return null;
+   }
+@@ -110,7 +133,7 @@ export default function SidebarProjectSessions({
+       ) : !hasSessions && !isLoadingSessions ? (
+         <div className="px-3 py-2 text-left">
+           <p className="text-xs text-muted-foreground">{t('sessions.noSessions')}</p>
+         </div>
+       ) : (
+-        sessions.map((session) => (
++        standaloneSessions.map((session) => (
+           <SidebarSessionItem
+             key={session.id}
+             project={project}
+@@ -129,6 +152,53 @@ export default function SidebarProjectSessions({
+             t={t}
+           />
+         ))
+       )}
+
++      {sessionGroups.size > 0 && Array.from(sessionGroups.entries()).map(([parentId, children]) => {
++        const isExpanded = expandedGroups.has(parentId);
++        const groupName = children[0]?.summary
++          ? `Build: ${children.length} sessions`
++          : `Build run (${children.length})`;
++
++        return (
++          <div key={parentId} className="mt-1">
++            <button
++              onClick={() => toggleGroup(parentId)}
++              className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
++            >
++              {isExpanded ? (
++                <ChevronDown className="h-3 w-3 flex-shrink-0" />
++              ) : (
++                <ChevronRight className="h-3 w-3 flex-shrink-0" />
++              )}
++              <Layers className="h-3 w-3 flex-shrink-0 opacity-60" />
++              <span className="flex-1 truncate">{groupName}</span>
++              <span className="flex-shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium">
++                {children.length}
++              </span>
++            </button>
++            {isExpanded && (
++              <div className="ml-3 space-y-0.5 border-l border-border/50 pl-2">
++                {children.map((session) => (
++                  <SidebarSessionItem
++                    key={session.id}
++                    project={project}
++                    session={session}
++                    selectedSession={selectedSession}
++                    currentTime={currentTime}
++                    editingSession={editingSession}
++                    editingSessionName={editingSessionName}
++                    onEditingSessionNameChange={onEditingSessionNameChange}
++                    onStartEditingSession={onStartEditingSession}
++                    onCancelEditingSession={onCancelEditingSession}
++                    onSaveEditingSession={onSaveEditingSession}
++                    onProjectSelect={onProjectSelect}
++                    onSessionSelect={onSessionSelect}
++                    onDeleteSession={onDeleteSession}
++                    t={t}
++                  />
++                ))}
++              </div>
++            )}
++          </div>
++        );
++      })}
++
+       {hasSessions && hasMoreSessions && (
+         <Button
+           variant="ghost"

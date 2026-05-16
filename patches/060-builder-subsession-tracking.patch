@@ -1,0 +1,206 @@
+diff --git a/server/database/schema.js b/server/database/schema.js
+index 1234567..abcdefg 100644
+--- a/server/database/schema.js
++++ b/server/database/schema.js
+@@ -31,6 +31,7 @@ export const SESSION_NAMES_TABLE_SQL = `CREATE TABLE IF NOT EXISTS session_names
+   session_id TEXT NOT NULL,
+   provider TEXT NOT NULL DEFAULT 'claude',
+   custom_name TEXT NOT NULL,
++  parent_session_id TEXT DEFAULT NULL,
+   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+   UNIQUE(session_id, provider)
+diff --git a/server/database/db.js b/server/database/db.js
+index 1234567..abcdefg 100644
+--- a/server/database/db.js
++++ b/server/database/db.js
+@@ -115,6 +115,14 @@ const runMigrations = () => {
+     db.exec(SESSION_NAMES_TABLE_SQL);
+     db.exec(SESSION_NAMES_LOOKUP_INDEX_SQL);
+
++    // Add parent_session_id column to session_names if not present
++    const sessionNamesInfo = db.prepare("PRAGMA table_info(session_names)").all();
++    const sessionNamesColumns = sessionNamesInfo.map(col => col.name);
++    if (!sessionNamesColumns.includes('parent_session_id')) {
++      console.log('Running migration: Adding parent_session_id column to session_names');
++      db.exec('ALTER TABLE session_names ADD COLUMN parent_session_id TEXT DEFAULT NULL');
++    }
++
+     console.log('Database migrations completed successfully');
+   } catch (error) {
+     console.error('Error running migrations:', error.message);
+@@ -513,6 +521,38 @@ const sessionNamesDb = {
+     return db.prepare(
+       'DELETE FROM session_names WHERE session_id = ? AND provider = ?'
+     ).run(sessionId, provider).changes > 0;
+   },
++
++  // Set parent session for a child session (creates row if absent)
++  setParent: (sessionId, provider, parentSessionId) => {
++    db.prepare(`
++      INSERT INTO session_names (session_id, provider, custom_name, parent_session_id)
++      VALUES (?, ?, '', ?)
++      ON CONFLICT(session_id, provider)
++      DO UPDATE SET parent_session_id = excluded.parent_session_id, updated_at = CURRENT_TIMESTAMP
++    `).run(sessionId, provider, parentSessionId);
++  },
++
++  // Batch lookup of parent session IDs — returns Map<sessionId, parentSessionId>
++  getParents: (sessionIds, provider) => {
++    if (!sessionIds.length) return new Map();
++    const placeholders = sessionIds.map(() => '?').join(',');
++    const rows = db.prepare(
++      `SELECT session_id, parent_session_id FROM session_names
++       WHERE session_id IN (${placeholders}) AND provider = ? AND parent_session_id IS NOT NULL`
++    ).all(...sessionIds, provider);
++    return new Map(rows.map(r => [r.session_id, r.parent_session_id]));
++  },
++
++  // Get all child session IDs for a given parent
++  getChildren: (parentSessionId, provider) => {
++    const rows = db.prepare(
++      `SELECT session_id, custom_name FROM session_names
++       WHERE parent_session_id = ? AND provider = ?`
++    ).all(parentSessionId, provider);
++    return rows.map(r => ({ id: r.session_id, name: r.custom_name }));
++  },
+ };
+
+ // Apply custom session names from the database (overrides CLI-generated summaries)
+@@ -531,6 +563,21 @@ function applyCustomSessionNames(sessions, provider) {
+   }
+ }
+
++// Apply parent session IDs from the database
++function applyParentSessionIds(sessions, provider) {
++  if (!sessions?.length) return;
++  try {
++    const ids = sessions.map(s => s.id);
++    const parents = sessionNamesDb.getParents(ids, provider);
++    for (const session of sessions) {
++      const parentId = parents.get(session.id);
++      if (parentId) session.parentSessionId = parentId;
++    }
++  } catch (error) {
++    console.warn(`[DB] Failed to apply parent session ids for ${provider}:`, error.message);
++  }
++}
++
+ // App config database operations
+ const appConfigDb = {
+@@ -589,5 +636,7 @@ export {
+   sessionNamesDb,
+   applyCustomSessionNames,
++  applyParentSessionIds,
+   appConfigDb,
+   githubTokensDb // Backward compatibility
+ };
+diff --git a/server/projects.js b/server/projects.js
+index 1234567..abcdefg 100644
+--- a/server/projects.js
++++ b/server/projects.js
+@@ -462,6 +462,7 @@ async function getProjects(progressCallback = null) {
+       }
+       applyCustomSessionNames(project.sessions, 'claude');
++      applyParentSessionIds(project.sessions, 'claude');
+
+       // Also fetch Cursor sessions for this project
+       try {
+@@ -470,6 +471,7 @@ async function getProjects(progressCallback = null) {
+         project.cursorSessions = [];
+       }
+       applyCustomSessionNames(project.cursorSessions, 'cursor');
++      applyParentSessionIds(project.cursorSessions, 'cursor');
+
+       // Also fetch Codex sessions for this project
+       try {
+@@ -481,6 +483,7 @@ async function getProjects(progressCallback = null) {
+         project.codexSessions = [];
+       }
+       applyCustomSessionNames(project.codexSessions, 'codex');
++      applyParentSessionIds(project.codexSessions, 'codex');
+
+       // Also fetch Gemini sessions for this project
+       try {
+@@ -491,6 +494,7 @@ async function getProjects(progressCallback = null) {
+         project.geminiSessions = [];
+       }
+       applyCustomSessionNames(project.geminiSessions, 'gemini');
++      applyParentSessionIds(project.geminiSessions, 'gemini');
+diff --git a/server/index.js b/server/index.js
+index 1234567..abcdefg 100755
+--- a/server/index.js
++++ b/server/index.js
+@@ -53,7 +53,7 @@
+-import { initializeDatabase, sessionNamesDb, applyCustomSessionNames } from './database/db.js';
++import { initializeDatabase, sessionNamesDb, applyCustomSessionNames, applyParentSessionIds } from './database/db.js';
+
+@@ -434,6 +434,7 @@ app.get('/api/projects/:projectName/sessions', authenticateToken, async (req, re
+         const result = await getSessions(req.params.projectName, parseInt(limit), parseInt(offset));
+         applyCustomSessionNames(result.sessions, 'claude');
++        applyParentSessionIds(result.sessions, 'claude');
+         res.json(result);
+diff --git a/server/builder-mode.js b/server/builder-mode.js
+index a8b2c10..b9c3d11 100644
+--- a/server/builder-mode.js
++++ b/server/builder-mode.js
+@@ -9,6 +9,7 @@ import { sessionsDb } from './modules/database/index.js';
+ import { abortCodexSession, queryCodex } from './openai-codex.js';
+ import { abortGeminiSession, spawnGemini } from './gemini-cli.js';
+ import { providerAuthService } from './modules/providers/services/provider-auth.service.js';
++import { sessionNamesDb } from './database/db.js';
+
+ const TASKMASTER_DIR = '.taskmaster';
+@@ -128,10 +129,18 @@ const truncateOutput = (text, maxChars = 5000) => {
+   return text.length > maxChars ? `${text.slice(0, maxChars)}\n... [truncated]` : text;
+ };
+
+-const labelChildSession = (sessionId, label) => {
++const labelChildSession = (sessionId, label, parentSessionId) => {
+   if (!sessionId) return;
+   try {
+     sessionsDb.updateSessionCustomName(sessionId, label);
++    if (parentSessionId) {
++      sessionNamesDb.setParent(sessionId, 'claude', parentSessionId);
++    }
++  } catch (err) {
++    // Non-critical – don't break the pipeline if naming fails
++  }
++};
++
++const labelBuilderSession = (sessionId, command) => {
++  if (!sessionId) return;
++  try {
++    const label = `Build: ${command.length > 60 ? command.slice(0, 60) + '...' : command}`;
++    sessionNamesDb.setName(sessionId, 'claude', label);
+   } catch (err) {
+     // Non-critical – don't break the pipeline if naming fails
+   }
+@@ -2009,6 +2018,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+     });
+     let plannerSessionId = plannerWriter.getSessionId();
+     const workerTasks = plannerResult.tasks;
+-    labelChildSession(plannerSessionId, 'Planner');
++    labelBuilderSession(sessionId, command);
++    labelChildSession(plannerSessionId, 'Planner', sessionId);
+     const requestMarkdown = buildUserRequestMarkdown({
+       command,
+@@ -2146,7 +2156,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       outOfScopeRisks: planCoverageReview.outOfScopeRisks,
+       reviewerSessionId: planReviewWriter.getSessionId(),
+     });
+-    labelChildSession(planReviewWriter.getSessionId(), 'Plan Reviewer');
++    labelChildSession(planReviewWriter.getSessionId(), 'Plan Reviewer', sessionId);
+     await setBuilderRunPhase(runState, BUILDER_RUN_PHASES.planning, {
+@@ -2512,7 +2522,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+
+         const result = actorWriter.getSummary();
+-        labelChildSession(result.sessionId, actorLabel);
++        labelChildSession(result.sessionId, actorLabel, sessionId);
+         const passArtifact = await persistSlicePassArtifact({
+@@ -3057,7 +3067,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+
+       const qaResult = qaWriter.getSummary();
+-      labelChildSession(qaWriter.getSessionId(), 'QA');
++      labelChildSession(qaWriter.getSessionId(), 'QA', sessionId);
+       await reportStage(`Cross-provider QA completed with ${qaProvider}`, 'completed', {

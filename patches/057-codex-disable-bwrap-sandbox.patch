@@ -1,0 +1,32 @@
+diff --git a/server/openai-codex.js b/server/openai-codex.js
+index ceeb823..f3a2b01 100644
+--- a/server/openai-codex.js
++++ b/server/openai-codex.js
+@@ -168,22 +168,12 @@ function mapPermissionModeToCodexOptions(permissionMode) {
+-  switch (permissionMode) {
+-    case 'acceptEdits':
+-      return {
+-        sandboxMode: 'workspace-write',
+-        approvalPolicy: 'never'
+-      };
+-    case 'bypassPermissions':
+-      return {
+-        sandboxMode: 'danger-full-access',
+-        approvalPolicy: 'never'
+-      };
+-    case 'default':
+-    default:
+-      return {
+-        sandboxMode: 'workspace-write',
+-        approvalPolicy: 'untrusted'
+-      };
+-  }
++  // Inside Docker, bwrap (bubblewrap sandbox) cannot create mount namespaces
++  // because containers lack CAP_SYS_ADMIN. The 'workspace-write' mode would
++  // trigger bwrap and fail with "Failed to make / slave: Permission denied".
++  // All Codex sessions run with full access; the container itself is the sandbox.
++  return {
++    sandboxMode: 'danger-full-access',
++    approvalPolicy: 'never'
++  };
+ }

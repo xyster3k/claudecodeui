@@ -1,119 +1,199 @@
 diff --git a/src/components/sidebar/view/subcomponents/SidebarProjectSessions.tsx b/src/components/sidebar/view/subcomponents/SidebarProjectSessions.tsx
-index 1234567..abcdefg 100644
+index f676447..b9b5ac0 100644
 --- a/src/components/sidebar/view/subcomponents/SidebarProjectSessions.tsx
 +++ b/src/components/sidebar/view/subcomponents/SidebarProjectSessions.tsx
 @@ -1,4 +1,5 @@
--import { ChevronDown, Plus } from 'lucide-react';
+-import { Plus } from 'lucide-react';
 +import { useState, useMemo } from 'react';
-+import { ChevronDown, ChevronRight, Layers, Plus } from 'lucide-react';
++import { Plus, ChevronRight } from 'lucide-react';
  import type { TFunction } from 'i18next';
+ 
  import { Button } from '../../../../shared/view/ui';
- import type { Project, ProjectSession, LLMProvider } from '../../../../types/app';
-@@ -56,6 +57,28 @@ export default function SidebarProjectSessions({
-   onNewSession,
-   t,
- }: SidebarProjectSessionsProps) {
-+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+@@ -55,6 +56,146 @@ function SessionListSkeleton() {
+   );
+ }
+ 
++type SessionGroup = {
++  parent: SessionWithProvider;
++  children: SessionWithProvider[];
++};
 +
-+  const { standaloneSessions, sessionGroups } = useMemo(() => {
-+    const children = sessions.filter((s) => s.parentSessionId);
-+    const standalone = sessions.filter((s) => !s.parentSessionId);
++function useSessionGroups(sessions: SessionWithProvider[]) {
++  return useMemo(() => {
++    const childMap = new Map<string, SessionWithProvider[]>();
++    const parentIds = new Set<string>();
++    const standalone: SessionWithProvider[] = [];
 +
-+    // Group children by parentSessionId
-+    const groups = new Map<string, SessionWithProvider[]>();
-+    for (const child of children) {
-+      const parentId = child.parentSessionId as string;
-+      if (!groups.has(parentId)) {
-+        groups.set(parentId, []);
++    // First pass: identify children (sessions that have a parentSessionId)
++    for (const session of sessions) {
++      if (session.parentSessionId) {
++        const siblings = childMap.get(session.parentSessionId) || [];
++        siblings.push(session);
++        childMap.set(session.parentSessionId, siblings);
++        parentIds.add(session.parentSessionId);
 +      }
-+      groups.get(parentId)!.push(child);
 +    }
 +
-+    return { standaloneSessions: standalone, sessionGroups: groups };
-+  }, [sessions]);
-+
-+  const toggleGroup = (parentId: string) => {
-+    setExpandedGroups((prev) => {
-+      const next = new Set(prev);
-+      if (next.has(parentId)) {
-+        next.delete(parentId);
-+      } else {
-+        next.add(parentId);
++    // Second pass: build groups and standalone list
++    const groups: SessionGroup[] = [];
++    for (const session of sessions) {
++      if (session.parentSessionId) {
++        // Skip children — they're rendered inside their parent group
++        continue;
 +      }
-+      return next;
-+    });
-+  };
++      if (parentIds.has(session.id)) {
++        groups.push({ parent: session, children: childMap.get(session.id) || [] });
++      } else {
++        standalone.push(session);
++      }
++    }
 +
-   if (!isExpanded) {
-     return null;
++    return { groups, standalone };
++  }, [sessions]);
++}
++
++function SessionGroupItem({
++  group,
++  project,
++  selectedSession,
++  currentTime,
++  processingSessions,
++  editingSession,
++  editingSessionName,
++  onEditingSessionNameChange,
++  onStartEditingSession,
++  onCancelEditingSession,
++  onSaveEditingSession,
++  onProjectSelect,
++  onSessionSelect,
++  onAbortSession,
++  onDeleteSession,
++  t,
++}: {
++  group: SessionGroup;
++  project: Project;
++  selectedSession: ProjectSession | null;
++  currentTime: Date;
++  processingSessions: Set<string>;
++  editingSession: string | null;
++  editingSessionName: string;
++  onEditingSessionNameChange: (value: string) => void;
++  onStartEditingSession: (sessionId: string, initialName: string) => void;
++  onCancelEditingSession: () => void;
++  onSaveEditingSession: (projectName: string, sessionId: string, summary: string, provider: LLMProvider) => void;
++  onProjectSelect: (project: Project) => void;
++  onSessionSelect: (session: SessionWithProvider, projectName: string) => void;
++  onAbortSession: (sessionId: string, provider: LLMProvider) => void;
++  onDeleteSession: (projectName: string, sessionId: string, sessionTitle: string, provider: LLMProvider) => void;
++  t: TFunction;
++}) {
++  const [isExpanded, setIsExpanded] = useState(false);
++
++  return (
++    <div className="space-y-0.5">
++      {/* Parent session with expand toggle */}
++      <div className="flex items-center gap-0.5">
++        <button
++          className="flex h-5 shrink-0 items-center gap-0.5 rounded px-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
++          onClick={() => setIsExpanded(!isExpanded)}
++          title={isExpanded ? 'Collapse subsessions' : `Expand ${group.children.length} subsessions`}
++        >
++          <ChevronRight className={`h-3 w-3 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
++          <span className="text-[10px]">{group.children.length}</span>
++        </button>
++        <div className="min-w-0 flex-1">
++          <SidebarSessionItem
++            project={project}
++            session={group.parent}
++            selectedSession={selectedSession}
++            currentTime={currentTime}
++            isProcessing={processingSessions.has(group.parent.id)}
++            editingSession={editingSession}
++            editingSessionName={editingSessionName}
++            onEditingSessionNameChange={onEditingSessionNameChange}
++            onStartEditingSession={onStartEditingSession}
++            onCancelEditingSession={onCancelEditingSession}
++            onSaveEditingSession={onSaveEditingSession}
++            onProjectSelect={onProjectSelect}
++            onSessionSelect={onSessionSelect}
++            onAbortSession={onAbortSession}
++            onDeleteSession={onDeleteSession}
++            t={t}
++          />
++        </div>
++      </div>
++
++      {/* Children (collapsed by default) */}
++      {isExpanded && (
++        <div className="ml-4 space-y-0.5 border-l border-border/50 pl-2">
++          {group.children.map((child) => (
++            <SidebarSessionItem
++              key={child.id}
++              project={project}
++              session={child}
++              selectedSession={selectedSession}
++              currentTime={currentTime}
++              isProcessing={processingSessions.has(child.id)}
++              editingSession={editingSession}
++              editingSessionName={editingSessionName}
++              onEditingSessionNameChange={onEditingSessionNameChange}
++              onStartEditingSession={onStartEditingSession}
++              onCancelEditingSession={onCancelEditingSession}
++              onSaveEditingSession={onSaveEditingSession}
++              onProjectSelect={onProjectSelect}
++              onSessionSelect={onSessionSelect}
++              onAbortSession={onAbortSession}
++              onDeleteSession={onDeleteSession}
++              t={t}
++            />
++          ))}
++        </div>
++      )}
++    </div>
++  );
++}
++
+ export default function SidebarProjectSessions({
+   project,
+   isExpanded,
+@@ -84,6 +225,7 @@ export default function SidebarProjectSessions({
    }
-@@ -110,7 +133,7 @@ export default function SidebarProjectSessions({
-       ) : !hasSessions && !isLoadingSessions ? (
-         <div className="px-3 py-2 text-left">
-           <p className="text-xs text-muted-foreground">{t('sessions.noSessions')}</p>
+ 
+   const hasSessions = sessions.length > 0;
++  const { groups, standalone } = useSessionGroups(sessions);
+ 
+   return (
+     <div className="ml-3 space-y-1 border-l border-border pl-3">
+@@ -118,7 +260,31 @@ export default function SidebarProjectSessions({
          </div>
        ) : (
--        sessions.map((session) => (
-+        standaloneSessions.map((session) => (
-           <SidebarSessionItem
-             key={session.id}
-             project={project}
-@@ -129,6 +152,53 @@ export default function SidebarProjectSessions({
-             t={t}
-           />
-         ))
-       )}
-
-+      {sessionGroups.size > 0 && Array.from(sessionGroups.entries()).map(([parentId, children]) => {
-+        const isExpanded = expandedGroups.has(parentId);
-+        const groupName = children[0]?.summary
-+          ? `Build: ${children.length} sessions`
-+          : `Build run (${children.length})`;
+         <>
+-          {sessions.map((session) => (
++          {/* Grouped builder sessions */}
++          {groups.map((group) => (
++            <SessionGroupItem
++              key={group.parent.id}
++              group={group}
++              project={project}
++              selectedSession={selectedSession}
++              currentTime={currentTime}
++              processingSessions={processingSessions}
++              editingSession={editingSession}
++              editingSessionName={editingSessionName}
++              onEditingSessionNameChange={onEditingSessionNameChange}
++              onStartEditingSession={onStartEditingSession}
++              onCancelEditingSession={onCancelEditingSession}
++              onSaveEditingSession={onSaveEditingSession}
++              onProjectSelect={onProjectSelect}
++              onSessionSelect={onSessionSelect}
++              onAbortSession={onAbortSession}
++              onDeleteSession={onDeleteSession}
++              t={t}
++            />
++          ))}
 +
-+        return (
-+          <div key={parentId} className="mt-1">
-+            <button
-+              onClick={() => toggleGroup(parentId)}
-+              className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-+            >
-+              {isExpanded ? (
-+                <ChevronDown className="h-3 w-3 flex-shrink-0" />
-+              ) : (
-+                <ChevronRight className="h-3 w-3 flex-shrink-0" />
-+              )}
-+              <Layers className="h-3 w-3 flex-shrink-0 opacity-60" />
-+              <span className="flex-1 truncate">{groupName}</span>
-+              <span className="flex-shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium">
-+                {children.length}
-+              </span>
-+            </button>
-+            {isExpanded && (
-+              <div className="ml-3 space-y-0.5 border-l border-border/50 pl-2">
-+                {children.map((session) => (
-+                  <SidebarSessionItem
-+                    key={session.id}
-+                    project={project}
-+                    session={session}
-+                    selectedSession={selectedSession}
-+                    currentTime={currentTime}
-+                    editingSession={editingSession}
-+                    editingSessionName={editingSessionName}
-+                    onEditingSessionNameChange={onEditingSessionNameChange}
-+                    onStartEditingSession={onStartEditingSession}
-+                    onCancelEditingSession={onCancelEditingSession}
-+                    onSaveEditingSession={onSaveEditingSession}
-+                    onProjectSelect={onProjectSelect}
-+                    onSessionSelect={onSessionSelect}
-+                    onDeleteSession={onDeleteSession}
-+                    t={t}
-+                  />
-+                ))}
-+              </div>
-+            )}
-+          </div>
-+        );
-+      })}
-+
-       {hasSessions && hasMoreSessions && (
-         <Button
-           variant="ghost"
++          {/* Standalone sessions (no parent, no children) */}
++          {standalone.map((session) => (
+             <SidebarSessionItem
+               key={session.id}
+               project={project}

@@ -1,8 +1,11 @@
 diff --git a/server/openai-codex.js b/server/openai-codex.js
-index ceeb823..f3a2b01 100644
+index ceeb823..37063b2 100644
 --- a/server/openai-codex.js
 +++ b/server/openai-codex.js
-@@ -168,22 +168,12 @@ function mapPermissionModeToCodexOptions(permissionMode) {
+@@ -203,24 +203,14 @@ function transformCodexEvent(event) {
+  * @returns {object} - { sandboxMode, approvalPolicy }
+  */
+ function mapPermissionModeToCodexOptions(permissionMode) {
 -  switch (permissionMode) {
 -    case 'acceptEdits':
 -      return {
@@ -30,3 +33,5 @@ index ceeb823..f3a2b01 100644
 +    approvalPolicy: 'never'
 +  };
  }
+ 
+ /**

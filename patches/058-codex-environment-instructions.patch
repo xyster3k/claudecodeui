@@ -1,11 +1,11 @@
 diff --git a/server/builder-mode.js b/server/builder-mode.js
-index ff6e133..a8b2c10 100644
+index df341c8..7a70b2e 100644
 --- a/server/builder-mode.js
 +++ b/server/builder-mode.js
-@@ -39,6 +39,22 @@ const DEFAULT_MAX_REPLAN_ATTEMPTS = 2;
+@@ -43,6 +43,22 @@ const DEFAULT_MAX_REPLAN_ATTEMPTS = 2;
  const DEFAULT_WORKER_TIMEOUT_MS = 10 * 60 * 1000;
  const DEFAULT_PLANNER_TIMEOUT_MS = 15 * 60 * 1000;
-
+ 
 +const DOCKER_ENVIRONMENT_NOTICE = [
 +  '## Execution Environment',
 +  '',
@@ -19,19 +19,13 @@ index ff6e133..a8b2c10 100644
 +  '- For code review tasks: prioritize reading and analyzing code over running commands. Only run commands when you need to verify compilation or test results.',
 +  '- If shell commands produce sandbox or permission errors, STOP retrying and switch to file-based analysis instead.',
 +  '',
-+].join('\n');
++].join('
++');
 +
  const PROVIDER_RUNNERS = {
    claude: queryClaudeSDK,
    cursor: spawnCursor,
-@@ -1420,6 +1436,7 @@ const buildSliceExecutionPrompt = ({
-   siblingSliceTitles?.length ? `Other worker slices running in parallel: ${siblingSliceTitles.join(', ')}` : '',
-   '',
-+  DOCKER_ENVIRONMENT_NOTICE,
-   'Owned slice:',
-   summarizeTaskDefinition(task),
-   '',
-@@ -2975,6 +2992,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+@@ -3147,6 +3163,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
            'Worker results:',
            formatWorkerResults(workerResults),
            '',
@@ -40,16 +34,16 @@ index ff6e133..a8b2c10 100644
            '- The final integrator has already run.',
            '- The repository as it exists right now is the source of truth.',
 diff --git a/server/tester-mode.js b/server/tester-mode.js
-index a56be8c..c3d1e22 100644
+index a56be8c..2444064 100644
 --- a/server/tester-mode.js
 +++ b/server/tester-mode.js
-@@ -209,6 +209,9 @@ const loadBuilderArtifacts = async (projectPath, builderRunId) => {
-
+@@ -210,6 +210,9 @@ const loadBuilderArtifacts = async (projectPath, builderRunId) => {
  const ENVIRONMENT_SETUP_INSTRUCTIONS = [
    '## Environment & Full System Access',
-+  '',
+   '',
 +  'IMPORTANT: You are running inside a Docker container on a build/CI server. This is NOT the production server.',
 +  'Commands you run here affect only the local project copy. To interact with production, you MUST use SSH (see CLAUDE.md).',
-   '',
++  '',
    'You have FULL shell access with all permissions bypassed. Use it aggressively.',
    'You can run ANY command, install ANY package, SSH into remote servers, query databases, read logs — whatever is needed.',
+   '',

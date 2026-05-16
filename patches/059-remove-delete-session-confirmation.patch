@@ -1,29 +1,16 @@
 diff --git a/src/components/sidebar/hooks/useSidebarController.ts b/src/components/sidebar/hooks/useSidebarController.ts
-index 1234567..abcdefg 100644
+index 909355d..e9d378f 100644
 --- a/src/components/sidebar/hooks/useSidebarController.ts
 +++ b/src/components/sidebar/hooks/useSidebarController.ts
-@@ -399,12 +399,30 @@ export function useSidebarController({
-
-   const showDeleteSessionConfirmation = useCallback(
-     (
-       projectName: string,
-       sessionId: string,
+@@ -560,9 +560,21 @@ export function useSidebarController({
        sessionTitle: string,
        provider: SessionDeleteConfirmation['provider'] = 'claude',
      ) => {
--      setSessionDeleteConfirmation({ projectName, sessionId, sessionTitle, provider });
+-      setSessionDeleteConfirmation({ projectId, sessionId, sessionTitle, provider });
 +      // Delete immediately without confirmation dialog
 +      (async () => {
 +        try {
-+          let response;
-+          if (provider === 'codex') {
-+            response = await api.deleteCodexSession(sessionId);
-+          } else if (provider === 'gemini') {
-+            response = await api.deleteGeminiSession(sessionId);
-+          } else {
-+            response = await api.deleteSession(projectName, sessionId);
-+          }
-+
++          const response = await api.deleteSession(sessionId);
 +          if (response.ok) {
 +            onSessionDelete?.(sessionId);
 +          } else {
@@ -37,5 +24,5 @@ index 1234567..abcdefg 100644
 -    [],
 +    [onSessionDelete],
    );
-
+ 
    const confirmDeleteSession = useCallback(async () => {

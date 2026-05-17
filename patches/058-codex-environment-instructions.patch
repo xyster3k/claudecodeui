@@ -1,11 +1,11 @@
 diff --git a/server/builder-mode.js b/server/builder-mode.js
-index df341c8..7a70b2e 100644
+index df341c8..cf48fef 100644
 --- a/server/builder-mode.js
 +++ b/server/builder-mode.js
-@@ -43,6 +43,22 @@ const DEFAULT_MAX_REPLAN_ATTEMPTS = 2;
+@@ -42,6 +42,21 @@ const DEFAULT_MAX_SLICE_REVIEWER_PASSES = 1;
+ const DEFAULT_MAX_REPLAN_ATTEMPTS = 2;
  const DEFAULT_WORKER_TIMEOUT_MS = 10 * 60 * 1000;
  const DEFAULT_PLANNER_TIMEOUT_MS = 15 * 60 * 1000;
- 
 +const DOCKER_ENVIRONMENT_NOTICE = [
 +  '## Execution Environment',
 +  '',
@@ -19,20 +19,19 @@ index df341c8..7a70b2e 100644
 +  '- For code review tasks: prioritize reading and analyzing code over running commands. Only run commands when you need to verify compilation or test results.',
 +  '- If shell commands produce sandbox or permission errors, STOP retrying and switch to file-based analysis instead.',
 +  '',
-+].join('
-+');
++].join('\n');
 +
+ 
  const PROVIDER_RUNNERS = {
    claude: queryClaudeSDK,
-   cursor: spawnCursor,
-@@ -3147,6 +3163,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+@@ -3146,6 +3161,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+           '',
            'Worker results:',
            formatWorkerResults(workerResults),
-           '',
 +          DOCKER_ENVIRONMENT_NOTICE,
+           '',
            'Context:',
            '- The final integrator has already run.',
-           '- The repository as it exists right now is the source of truth.',
 diff --git a/server/tester-mode.js b/server/tester-mode.js
 index a56be8c..2444064 100644
 --- a/server/tester-mode.js

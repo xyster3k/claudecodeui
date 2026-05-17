@@ -1,5 +1,5 @@
 diff --git a/src/components/sidebar/view/subcomponents/SidebarProjectSessions.tsx b/src/components/sidebar/view/subcomponents/SidebarProjectSessions.tsx
-index f676447..b9b5ac0 100644
+index f676447..32d5866 100644
 --- a/src/components/sidebar/view/subcomponents/SidebarProjectSessions.tsx
 +++ b/src/components/sidebar/view/subcomponents/SidebarProjectSessions.tsx
 @@ -1,4 +1,5 @@
@@ -9,7 +9,7 @@ index f676447..b9b5ac0 100644
  import type { TFunction } from 'i18next';
  
  import { Button } from '../../../../shared/view/ui';
-@@ -55,6 +56,146 @@ function SessionListSkeleton() {
+@@ -55,6 +56,153 @@ function SessionListSkeleton() {
    );
  }
  
@@ -36,9 +36,16 @@ index f676447..b9b5ac0 100644
 +
 +    // Second pass: build groups and standalone list
 +    const groups: SessionGroup[] = [];
++    const sessionIdSet = new Set(sessions.map(s => s.id));
 +    for (const session of sessions) {
 +      if (session.parentSessionId) {
-+        // Skip children — they're rendered inside their parent group
++        // If the parent exists in the list, this child will be rendered
++        // inside its group. If the parent is missing (e.g. paginated out),
++        // show the child as a standalone session so it doesn't disappear.
++        if (sessionIdSet.has(session.parentSessionId)) {
++          continue;
++        }
++        standalone.push(session);
 +        continue;
 +      }
 +      if (parentIds.has(session.id)) {
@@ -156,7 +163,7 @@ index f676447..b9b5ac0 100644
  export default function SidebarProjectSessions({
    project,
    isExpanded,
-@@ -84,6 +225,7 @@ export default function SidebarProjectSessions({
+@@ -84,6 +232,7 @@ export default function SidebarProjectSessions({
    }
  
    const hasSessions = sessions.length > 0;
@@ -164,7 +171,7 @@ index f676447..b9b5ac0 100644
  
    return (
      <div className="ml-3 space-y-1 border-l border-border pl-3">
-@@ -118,7 +260,31 @@ export default function SidebarProjectSessions({
+@@ -118,7 +267,31 @@ export default function SidebarProjectSessions({
          </div>
        ) : (
          <>

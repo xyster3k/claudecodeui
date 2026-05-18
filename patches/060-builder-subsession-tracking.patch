@@ -10,6 +10,9 @@ index cf48fef..896d746 100644
 +const labelChildSession = (sessionId, label, parentSessionId) => {
    if (!sessionId) return;
    try {
++    // Ensure the session row exists — codex/gemini sessions may not have
++    // been created in the DB yet when the builder pipeline finishes.
++    sessionsDb.ensureSessionExists(sessionId);
      sessionsDb.updateSessionCustomName(sessionId, label);
 +    if (parentSessionId) {
 +      sessionsDb.setParentSession(sessionId, parentSessionId);
@@ -131,10 +134,28 @@ index 19a96a5..ad9b9dc 100644
           FROM sessions
           WHERE project_path = ?
           ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, session_id DESC
+@@ -56,7 +57,8 @@ export const sessionsDb = {
+        ON CONFLICT(session_id) DO UPDATE SET
+          provider = excluded.provider,
+          updated_at = excluded.updated_at,
+-         project_path = excluded.project_path,
++         project_path = COALESCE(NULLIF(excluded.project_path, ''), sessions.project_path),
++         parent_session_id = COALESCE(sessions.parent_session_id, excluded.parent_session_id),
+          jsonl_path = excluded.jsonl_path,
+          custom_name = COALESCE(excluded.custom_name, sessions.custom_name)`
+
 @@ -171,4 +172,22 @@ export const sessionsDb = {
      const db = getConnection();
      return db.prepare('DELETE FROM sessions WHERE session_id = ?').run(sessionId).changes > 0;
    },
++
++  ensureSessionExists(sessionId: string): void {
++    const db = getConnection();
++    db.prepare(
++      `INSERT OR IGNORE INTO sessions (session_id, provider, project_path, created_at, updated_at)
++       VALUES (?, 'unknown', '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
++    ).run(sessionId);
++  },
 +
 +  setParentSession(sessionId: string, parentSessionId: string): void {
 +    const db = getConnection();

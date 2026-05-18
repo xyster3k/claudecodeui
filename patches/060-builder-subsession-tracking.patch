@@ -1,10 +1,11 @@
 diff --git a/server/builder-mode.js b/server/builder-mode.js
+index cf48fef..524fa90 100644
 --- a/server/builder-mode.js
 +++ b/server/builder-mode.js
-@@ -158,13 +158,28 @@ const truncateOutput = (text, maxChars = 5000) => {
+@@ -158,15 +158,33 @@ const truncateOutput = (text, maxChars = 5000) => {
    return text.length > maxChars ? `${text.slice(0, maxChars)}\n... [truncated]` : text;
  };
-
+ 
 -const labelChildSession = (sessionId, label) => {
 +const labelChildSession = (sessionId, label, parentSessionId) => {
    if (!sessionId) return;
@@ -20,7 +21,7 @@ diff --git a/server/builder-mode.js b/server/builder-mode.js
      // Non-critical – don't break the pipeline if naming fails
    }
  };
-
+ 
 +const labelBuilderSession = (sessionId, command, projectPath, provider = 'claude') => {
 +  if (!sessionId) return;
 +  try {
@@ -34,7 +35,9 @@ diff --git a/server/builder-mode.js b/server/builder-mode.js
 +};
 +
  const stripCodeFences = (text) => text
-@@ -2130,7 +2145,8 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+   .replace(/^```(?:json|markdown|md|txt)?\s*/i, '')
+   .replace(/```$/i, '')
+@@ -2130,7 +2148,8 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
      });
      let plannerSessionId = plannerWriter.getSessionId();
      const workerTasks = plannerResult.tasks;
@@ -42,34 +45,49 @@ diff --git a/server/builder-mode.js b/server/builder-mode.js
 +    labelBuilderSession(sessionId, command, projectPath, provider);
 +    labelChildSession(plannerSessionId, 'Planner', sessionId);
      const requestMarkdown = buildUserRequestMarkdown({
-@@ -2267,7 +2283,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       command,
+       projectPath,
+@@ -2267,7 +2286,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       outOfScopeRisks: planCoverageReview.outOfScopeRisks,
        reviewerSessionId: planReviewWriter.getSessionId(),
      });
 -    labelChildSession(planReviewWriter.getSessionId(), 'Plan Reviewer');
 +    labelChildSession(planReviewWriter.getSessionId(), 'Plan Reviewer', sessionId);
      await setBuilderRunPhase(runState, BUILDER_RUN_PHASES.planning, {
-@@ -2633,7 +2649,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
-
+       planCoverageApproved: planCoverageReview.approved,
+       planCoverageSummary: planCoverageReview.coverageSummary,
+@@ -2633,7 +2652,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+         });
+ 
          const result = actorWriter.getSummary();
 -        labelChildSession(result.sessionId, actorLabel);
 +        labelChildSession(result.sessionId, actorLabel, sessionId);
          const passArtifact = await persistSlicePassArtifact({
-@@ -3201,7 +3217,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
-
+           projectPath,
+           builderSessionId: sessionId,
+@@ -3201,7 +3220,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       }
+ 
        const qaResult = qaWriter.getSummary();
 -      labelChildSession(qaWriter.getSessionId(), 'QA');
 +      labelChildSession(qaWriter.getSessionId(), 'QA', sessionId);
        await reportStage(`Cross-provider QA completed with ${qaProvider}`, 'completed', {
+         stage: BUILDER_RUN_PHASES.qa,
+       });
 diff --git a/server/modules/database/migrations.ts b/server/modules/database/migrations.ts
+index 09de8eb..eac69b4 100644
 --- a/server/modules/database/migrations.ts
 +++ b/server/modules/database/migrations.ts
 @@ -257,6 +257,7 @@ const rebuildSessionsTableWithProjectSchema = (db: Database): void => {
-
+ 
    if (!shouldRebuild) {
      addColumnToTableIfNotExists(db, 'sessions', columnNames, 'jsonl_path', 'TEXT');
 +    addColumnToTableIfNotExists(db, 'sessions', columnNames, 'parent_session_id', 'TEXT DEFAULT NULL');
      addColumnToTableIfNotExists(db, 'sessions', columnNames, 'created_at', 'DATETIME');
+     addColumnToTableIfNotExists(db, 'sessions', columnNames, 'updated_at', 'DATETIME');
+     db.exec('UPDATE sessions SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP)');
 diff --git a/server/modules/database/repositories/sessions.db.ts b/server/modules/database/repositories/sessions.db.ts
+index 19a96a5..c0e8947 100644
 --- a/server/modules/database/repositories/sessions.db.ts
 +++ b/server/modules/database/repositories/sessions.db.ts
 @@ -8,6 +8,7 @@ type SessionRow = {
@@ -80,7 +98,7 @@ diff --git a/server/modules/database/repositories/sessions.db.ts b/server/module
    created_at: string;
    updated_at: string;
  };
-@@ -59,7 +60,8 @@ export const sessionsDb = {
+@@ -58,7 +59,8 @@ export const sessionsDb = {
         ON CONFLICT(session_id) DO UPDATE SET
           provider = excluded.provider,
           updated_at = excluded.updated_at,
@@ -89,31 +107,45 @@ diff --git a/server/modules/database/repositories/sessions.db.ts b/server/module
 +         parent_session_id = COALESCE(sessions.parent_session_id, excluded.parent_session_id),
           jsonl_path = excluded.jsonl_path,
           custom_name = COALESCE(excluded.custom_name, sessions.custom_name)`
-@@ -90,7 +92,7 @@ export const sessionsDb = {
+     ).run(
+@@ -87,7 +89,7 @@ export const sessionsDb = {
+     const db = getConnection();
+     const row = db
        .prepare(
 -        `SELECT session_id, provider, project_path, jsonl_path, custom_name, created_at, updated_at
 +        `SELECT session_id, provider, project_path, jsonl_path, custom_name, parent_session_id, created_at, updated_at
           FROM sessions
           WHERE session_id = ?
-@@ -105,7 +107,7 @@ export const sessionsDb = {
+          ORDER BY updated_at DESC
+@@ -102,7 +104,7 @@ export const sessionsDb = {
+     const db = getConnection();
+     return db
        .prepare(
 -        `SELECT session_id, provider, project_path, jsonl_path, custom_name, created_at, updated_at
 +        `SELECT session_id, provider, project_path, jsonl_path, custom_name, parent_session_id, created_at, updated_at
           FROM sessions`
-@@ -117,7 +119,7 @@ export const sessionsDb = {
+       )
+       .all() as SessionRow[];
+@@ -113,7 +115,7 @@ export const sessionsDb = {
+     const normalizedProjectPath = normalizeProjectPath(projectPath);
+     return db
        .prepare(
 -        `SELECT session_id, provider, project_path, jsonl_path, custom_name, created_at, updated_at
 +        `SELECT session_id, provider, project_path, jsonl_path, custom_name, parent_session_id, created_at, updated_at
           FROM sessions
           WHERE project_path = ?`
-@@ -129,7 +131,7 @@ export const sessionsDb = {
+       )
+@@ -125,7 +127,7 @@ export const sessionsDb = {
+     const normalizedProjectPath = normalizeProjectPath(projectPath);
+     return db
        .prepare(
 -        `SELECT session_id, provider, project_path, jsonl_path, custom_name, created_at, updated_at
 +        `SELECT session_id, provider, project_path, jsonl_path, custom_name, parent_session_id, created_at, updated_at
           FROM sessions
           WHERE project_path = ?
           ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, session_id DESC
-@@ -174,4 +176,22 @@ export const sessionsDb = {
+@@ -171,4 +173,30 @@ export const sessionsDb = {
+     const db = getConnection();
      return db.prepare('DELETE FROM sessions WHERE session_id = ?').run(sessionId).changes > 0;
    },
 +
@@ -144,6 +176,7 @@ diff --git a/server/modules/database/repositories/sessions.db.ts b/server/module
 +  },
  };
 diff --git a/server/modules/database/schema.ts b/server/modules/database/schema.ts
+index 7af3d80..39c6831 100644
 --- a/server/modules/database/schema.ts
 +++ b/server/modules/database/schema.ts
 @@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS sessions (
@@ -155,6 +188,7 @@ diff --git a/server/modules/database/schema.ts b/server/modules/database/schema.
      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
      PRIMARY KEY (session_id),
 diff --git a/server/modules/projects/services/projects-with-sessions-fetch.service.ts b/server/modules/projects/services/projects-with-sessions-fetch.service.ts
+index 4d473a2..8daf00d 100644
 --- a/server/modules/projects/services/projects-with-sessions-fetch.service.ts
 +++ b/server/modules/projects/services/projects-with-sessions-fetch.service.ts
 @@ -12,6 +12,7 @@ type SessionSummary = {
@@ -163,7 +197,7 @@ diff --git a/server/modules/projects/services/projects-with-sessions-fetch.servi
    lastActivity: string;
 +  parentSessionId?: string;
  };
-
+ 
  type SessionsByProvider = Record<'claude' | 'cursor' | 'codex' | 'gemini', SessionSummary[]>;
 @@ -20,6 +21,7 @@ type SessionRepositoryRow = {
    provider: string;
@@ -175,7 +209,7 @@ diff --git a/server/modules/projects/services/projects-with-sessions-fetch.servi
  };
 @@ -121,12 +123,16 @@ function normalizeSessionPagination(options: SessionPaginationOptions = {}): { l
  }
-
+ 
  function mapSessionRowToSummary(row: SessionRepositoryRow): SessionSummary {
 -  return {
 +  const summary: SessionSummary = {
@@ -189,9 +223,10 @@ diff --git a/server/modules/projects/services/projects-with-sessions-fetch.servi
 +  }
 +  return summary;
  }
-
+ 
  function bucketSessionRowsByProvider(rows: SessionRepositoryRow[]): SessionsByProvider {
 diff --git a/src/types/app.ts b/src/types/app.ts
+index 364807f..14200b4 100644
 --- a/src/types/app.ts
 +++ b/src/types/app.ts
 @@ -16,6 +16,7 @@ export interface ProjectSession {
@@ -201,4 +236,4 @@ diff --git a/src/types/app.ts b/src/types/app.ts
 +  parentSessionId?: string;
    [key: string]: unknown;
  }
-
+ 

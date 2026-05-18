@@ -19,13 +19,13 @@ index cf48fef..896d746 100644
    }
  };
  
-+const labelBuilderSession = (sessionId, command, projectPath) => {
++const labelBuilderSession = (sessionId, command, projectPath, provider = 'claude') => {
 +  if (!sessionId) return;
 +  try {
 +    const label = 'Build: ' + (command.length > 60 ? command.slice(0, 60) + '...' : command);
 +    // The builder session is virtual (not from Claude SDK), so we must
 +    // create it in the sessions table for sidebar grouping to work.
-+    sessionsDb.createSession(sessionId, 'claude', projectPath || '', label);
++    sessionsDb.createSession(sessionId, provider, projectPath || '', label);
 +  } catch (err) {
 +    // Non-critical
 +  }
@@ -39,7 +39,7 @@ index cf48fef..896d746 100644
      let plannerSessionId = plannerWriter.getSessionId();
      const workerTasks = plannerResult.tasks;
 -    labelChildSession(plannerSessionId, 'Planner');
-+    labelBuilderSession(sessionId, command, projectPath);
++    labelBuilderSession(sessionId, command, projectPath, provider);
 +    labelChildSession(plannerSessionId, 'Planner', sessionId);
      const requestMarkdown = buildUserRequestMarkdown({
        command,

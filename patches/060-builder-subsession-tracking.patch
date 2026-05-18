@@ -5,7 +5,7 @@ index cf48fef..896d746 100644
 @@ -158,15 +158,30 @@ const truncateOutput = (text, maxChars = 5000) => {
    return text.length > maxChars ? `${text.slice(0, maxChars)}\n... [truncated]` : text;
  };
- 
+
 -const labelChildSession = (sessionId, label) => {
 +const labelChildSession = (sessionId, label, parentSessionId) => {
    if (!sessionId) return;
@@ -21,7 +21,7 @@ index cf48fef..896d746 100644
      // Non-critical – don't break the pipeline if naming fails
    }
  };
- 
+
 +const labelBuilderSession = (sessionId, command, projectPath, provider = 'claude') => {
 +  if (!sessionId) return;
 +  try {
@@ -58,7 +58,7 @@ index cf48fef..896d746 100644
        planCoverageSummary: planCoverageReview.coverageSummary,
 @@ -2633,7 +2649,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
          });
- 
+
          const result = actorWriter.getSummary();
 -        labelChildSession(result.sessionId, actorLabel);
 +        labelChildSession(result.sessionId, actorLabel, sessionId);
@@ -67,7 +67,7 @@ index cf48fef..896d746 100644
            builderSessionId: sessionId,
 @@ -3201,7 +3217,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
        }
- 
+
        const qaResult = qaWriter.getSummary();
 -      labelChildSession(qaWriter.getSessionId(), 'QA');
 +      labelChildSession(qaWriter.getSessionId(), 'QA', sessionId);
@@ -79,7 +79,7 @@ index 09de8eb..eac69b4 100644
 --- a/server/modules/database/migrations.ts
 +++ b/server/modules/database/migrations.ts
 @@ -257,6 +257,7 @@ const rebuildSessionsTableWithProjectSchema = (db: Database): void => {
- 
+
    if (!shouldRebuild) {
      addColumnToTableIfNotExists(db, 'sessions', columnNames, 'jsonl_path', 'TEXT');
 +    addColumnToTableIfNotExists(db, 'sessions', columnNames, 'parent_session_id', 'TEXT DEFAULT NULL');
@@ -98,42 +98,6 @@ index 19a96a5..ad9b9dc 100644
    created_at: string;
    updated_at: string;
  };
-@@ -87,7 +88,7 @@ export const sessionsDb = {
-     const db = getConnection();
-     const row = db
-       .prepare(
--        `SELECT session_id, provider, project_path, jsonl_path, custom_name, created_at, updated_at
-+        `SELECT session_id, provider, project_path, jsonl_path, custom_name, parent_session_id, created_at, updated_at
-          FROM sessions
-          WHERE session_id = ?
-          ORDER BY updated_at DESC
-@@ -102,7 +103,7 @@ export const sessionsDb = {
-     const db = getConnection();
-     return db
-       .prepare(
--        `SELECT session_id, provider, project_path, jsonl_path, custom_name, created_at, updated_at
-+        `SELECT session_id, provider, project_path, jsonl_path, custom_name, parent_session_id, created_at, updated_at
-          FROM sessions`
-       )
-       .all() as SessionRow[];
-@@ -113,7 +114,7 @@ export const sessionsDb = {
-     const normalizedProjectPath = normalizeProjectPath(projectPath);
-     return db
-       .prepare(
--        `SELECT session_id, provider, project_path, jsonl_path, custom_name, created_at, updated_at
-+        `SELECT session_id, provider, project_path, jsonl_path, custom_name, parent_session_id, created_at, updated_at
-          FROM sessions
-          WHERE project_path = ?`
-       )
-@@ -125,7 +126,7 @@ export const sessionsDb = {
-     const normalizedProjectPath = normalizeProjectPath(projectPath);
-     return db
-       .prepare(
--        `SELECT session_id, provider, project_path, jsonl_path, custom_name, created_at, updated_at
-+        `SELECT session_id, provider, project_path, jsonl_path, custom_name, parent_session_id, created_at, updated_at
-          FROM sessions
-          WHERE project_path = ?
-          ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, session_id DESC
 @@ -56,7 +57,8 @@ export const sessionsDb = {
         ON CONFLICT(session_id) DO UPDATE SET
           provider = excluded.provider,
@@ -144,7 +108,43 @@ index 19a96a5..ad9b9dc 100644
           jsonl_path = excluded.jsonl_path,
           custom_name = COALESCE(excluded.custom_name, sessions.custom_name)`
 
-@@ -171,4 +172,22 @@ export const sessionsDb = {
+@@ -87,7 +89,7 @@ export const sessionsDb = {
+     const db = getConnection();
+     const row = db
+       .prepare(
+-        `SELECT session_id, provider, project_path, jsonl_path, custom_name, created_at, updated_at
++        `SELECT session_id, provider, project_path, jsonl_path, custom_name, parent_session_id, created_at, updated_at
+          FROM sessions
+          WHERE session_id = ?
+          ORDER BY updated_at DESC
+@@ -102,7 +104,7 @@ export const sessionsDb = {
+     const db = getConnection();
+     return db
+       .prepare(
+-        `SELECT session_id, provider, project_path, jsonl_path, custom_name, created_at, updated_at
++        `SELECT session_id, provider, project_path, jsonl_path, custom_name, parent_session_id, created_at, updated_at
+          FROM sessions`
+       )
+       .all() as SessionRow[];
+@@ -113,7 +115,7 @@ export const sessionsDb = {
+     const normalizedProjectPath = normalizeProjectPath(projectPath);
+     return db
+       .prepare(
+-        `SELECT session_id, provider, project_path, jsonl_path, custom_name, created_at, updated_at
++        `SELECT session_id, provider, project_path, jsonl_path, custom_name, parent_session_id, created_at, updated_at
+          FROM sessions
+          WHERE project_path = ?`
+       )
+@@ -125,7 +127,7 @@ export const sessionsDb = {
+     const normalizedProjectPath = normalizeProjectPath(projectPath);
+     return db
+       .prepare(
+-        `SELECT session_id, provider, project_path, jsonl_path, custom_name, created_at, updated_at
++        `SELECT session_id, provider, project_path, jsonl_path, custom_name, parent_session_id, created_at, updated_at
+          FROM sessions
+          WHERE project_path = ?
+          ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, session_id DESC
+@@ -171,4 +173,22 @@ export const sessionsDb = {
      const db = getConnection();
      return db.prepare('DELETE FROM sessions WHERE session_id = ?').run(sessionId).changes > 0;
    },
@@ -197,7 +197,7 @@ index 4d473a2..8daf00d 100644
    lastActivity: string;
 +  parentSessionId?: string;
  };
- 
+
  type SessionsByProvider = Record<'claude' | 'cursor' | 'codex' | 'gemini', SessionSummary[]>;
 @@ -20,6 +21,7 @@ type SessionRepositoryRow = {
    provider: string;
@@ -209,7 +209,7 @@ index 4d473a2..8daf00d 100644
  };
 @@ -121,12 +123,16 @@ function normalizeSessionPagination(options: SessionPaginationOptions = {}): { l
  }
- 
+
  function mapSessionRowToSummary(row: SessionRepositoryRow): SessionSummary {
 -  return {
 +  const summary: SessionSummary = {
@@ -223,7 +223,7 @@ index 4d473a2..8daf00d 100644
 +  }
 +  return summary;
  }
- 
+
  function bucketSessionRowsByProvider(rows: SessionRepositoryRow[]): SessionsByProvider {
 diff --git a/src/types/app.ts b/src/types/app.ts
 index 364807f..14200b4 100644
@@ -236,4 +236,4 @@ index 364807f..14200b4 100644
 +  parentSessionId?: string;
    [key: string]: unknown;
  }
- 
+

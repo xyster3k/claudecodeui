@@ -1,0 +1,461 @@
+diff --git a/server/routes/git.js b/server/routes/git.js
+index 685bf7e..a1b2c3d 100755
+--- a/server/routes/git.js
++++ b/server/routes/git.js
+@@ -1073,6 +1073,7 @@ router.get('/remote-status', async (req, res) => {
+         isUpToDate: false,
+         authMode: authInfo.mode,
+         authTokenName: authInfo.tokenName,
++        remoteUrl: authInfo.remoteUrl,
+         message: 'Repository has no commits yet'
+       });
+     }
+@@ -1097,6 +1098,7 @@ router.get('/remote-status', async (req, res) => {
+         remoteName: fallbackRemoteName,
+         authMode: authInfo.mode,
+         authTokenName: authInfo.tokenName,
++        remoteUrl: authInfo.remoteUrl,
+         message: 'No remote tracking branch configured',
+       });
+     }
+@@ -1120,6 +1122,7 @@ router.get('/remote-status', async (req, res) => {
+       isUpToDate: ahead === 0 && behind === 0,
+       authMode: authInfo.mode,
+       authTokenName: authInfo.tokenName,
++      remoteUrl: authInfo.remoteUrl,
+     });
+   } catch (error) {
+     console.error('Git remote status error:', error);
+@@ -1135,10 +1138,10 @@ async function detectAuthMode(projectPath, remoteName = 'origin') {
+     const { stdout: url } = await spawnAsync('git', ['remote', 'get-url', remoteName], { cwd: projectPath });
+     const u = (url || '').trim();
+     if (/^git@|^ssh:\/\//.test(u)) {
+-      return { mode: 'ssh', tokenName: null };
++      return { mode: 'ssh', tokenName: null, remoteUrl: u };
+     }
+     if (/^https?:\/\//.test(u)) {
+       // Look up a per-repo credential.<url>.username override; strip any embedded user@ and .git for the key
+       const key = `credential.${u.replace(/:\/\/[^@]+@/, '://').replace(/\/$/, '').replace(/\.git$/, '') + '.git'}.username`;
+       let tokenName = null;
+       try {
+@@ -1147,11 +1150,11 @@ async function detectAuthMode(projectPath, remoteName = 'origin') {
+         const { stdout } = await spawnAsync('git', ['config', '--local', '--get', key], { cwd: projectPath });
+         tokenName = stdout.trim() || null;
+       } catch (_) {}
+-      return { mode: 'https', tokenName };
++      return { mode: 'https', tokenName, remoteUrl: u };
+     }
+-    return { mode: 'unknown', tokenName: null };
++    return { mode: 'unknown', tokenName: null, remoteUrl: u };
+   } catch (_) {
+-    return { mode: 'unknown', tokenName: null };
++    return { mode: 'unknown', tokenName: null, remoteUrl: null };
+   }
+ }
+
+@@ -1217,7 +1220,7 @@ router.get('/remote-status', async (req, res) => {
+  * POST /api/git/auth-mode  { project: string, mode: 'https' | 'ssh', tokenName?: string }
+  */
+ router.post('/auth-mode', async (req, res) => {
+-  const { project, mode, tokenName } = req.body || {};
++  const { project, mode, tokenName, targetHost, owner: newOwner, repo: newRepo, keepBackupRemote } = req.body || {};
+   if (!project)        return res.status(400).json({ error: 'Project name is required' });
+   if (mode !== 'https' && mode !== 'ssh') return res.status(400).json({ error: "mode must be 'https' or 'ssh'" });
+
+@@ -1247,44 +1250,70 @@ router.post('/auth-mode', async (req, res) => {
+       return res.status(400).json({ error: 'Could not parse owner/repo from origin URL' });
+     }
+
++    // Provider switch: override host and ownerRepo if targetHost is provided
++    let finalHost = host;
++    let finalOwnerRepo = ownerRepo;
++    if (targetHost && targetHost !== host) {
++      finalHost = targetHost;
++      if (newOwner && newRepo) {
++        finalOwnerRepo = `${newOwner}/${newRepo}`;
++      } else if (newOwner) {
++        const parts = ownerRepo.split('/');
++        finalOwnerRepo = `${newOwner}/${parts[parts.length - 1]}`;
++      }
++
++      // Save old origin as a backup remote before switching
++      if (keepBackupRemote) {
++        const backupName = host.replace(/\./g, '-');
++        try {
++          await spawnAsync('git', ['remote', 'get-url', backupName], { cwd: projectPath });
++          // Remote exists — update it
++          await spawnAsync('git', ['remote', 'set-url', backupName, current], { cwd: projectPath });
++        } catch {
++          // Remote doesn't exist — create it
++          await spawnAsync('git', ['remote', 'add', backupName, current], { cwd: projectPath });
++        }
++      }
++    }
++
+     // Look up SSH host/port from the DB for non-GitHub hosts
+-    let sshHost = host;
++    let sshHost = finalHost;
+     let sshPort = '22';
+-    if (host !== 'github.com') {
++    if (finalHost !== 'github.com') {
+       try {
+         const { getConnection } = require('../modules/database/connection.js');
+         const db = getConnection();
+         const sshRow = db.prepare(
+           "SELECT ssh_host, ssh_port FROM user_credentials WHERE git_host = ? AND ssh_host IS NOT NULL LIMIT 1"
+-        ).get(host);
++        ).get(finalHost);
+         if (sshRow) {
+-          sshHost = sshRow.ssh_host || host;
++          sshHost = sshRow.ssh_host || finalHost;
+           sshPort = sshRow.ssh_port || '22';
+         }
+       } catch (_) {}
+     }
+
+     // Determine the HTTPS host for this remote (for SSH hosts, look up the HTTPS host)
+-    let httpsHost = host;
+-    if (host !== 'github.com' && mode === 'https') {
++    let httpsHost = finalHost;
++    if (finalHost !== 'github.com' && mode === 'https') {
+       try {
+         const { getConnection } = require('../modules/database/connection.js');
+         const db = getConnection();
+         const row = db.prepare(
+           "SELECT git_host FROM user_credentials WHERE ssh_host = ? LIMIT 1"
+-        ).get(host);
+-        if (row) httpsHost = row.git_host || host;
++        ).get(finalHost);
++        if (row) httpsHost = row.git_host || finalHost;
+       } catch (_) {}
+     }
+
+-    const httpsClean = `https://${httpsHost}/${ownerRepo}`;
++    const httpsClean = `https://${httpsHost}/${finalOwnerRepo}`;
+     let sshUrl;
+-    if (host === 'github.com') {
+-      sshUrl = `git@github.com:${ownerRepo}.git`;
++    if (finalHost === 'github.com') {
++      sshUrl = `git@github.com:${finalOwnerRepo}.git`;
+     } else if (sshPort === '22') {
+-      sshUrl = `git@${sshHost}:${ownerRepo}.git`;
++      sshUrl = `git@${sshHost}:${finalOwnerRepo}.git`;
+     } else {
+-      sshUrl = `ssh://git@${sshHost}:${sshPort}/${ownerRepo}.git`;
++      sshUrl = `ssh://git@${sshHost}:${sshPort}/${finalOwnerRepo}.git`;
+     }
+     const targetUrl = mode === 'ssh' ? sshUrl : `${httpsClean}.git`;
+
+diff --git a/src/components/git-panel/types/types.ts b/src/components/git-panel/types/types.ts
+index d96bd25..e3f4a12 100644
+--- a/src/components/git-panel/types/types.ts
++++ b/src/components/git-panel/types/types.ts
+@@ -42,6 +42,7 @@ export type GitRemoteStatus = {
+   error?: string;
+   authMode?: GitAuthMode;
+   authTokenName?: string | null;
++  remoteUrl?: string | null;
+ };
+
+ export type GitCommitSummary = {
+@@ -108,5 +109,5 @@ export type GitPanelController = {
+   commitChanges: (message: string, files: string[]) => Promise<boolean>;
+   createInitialCommit: () => Promise<boolean>;
+   openFile: (filePath: string) => Promise<void>;
+-  switchAuthMode: (mode: GitAuthMode, tokenName?: string | null) => Promise<boolean>;
++  switchAuthMode: (mode: GitAuthMode, tokenName?: string | null, targetHost?: string, owner?: string, repo?: string, keepBackupRemote?: boolean) => Promise<boolean>;
+ };
+diff --git a/src/components/git-panel/hooks/useGitPanelController.ts b/src/components/git-panel/hooks/useGitPanelController.ts
+index c5d7e88..b4e1f2a 100644
+--- a/src/components/git-panel/hooks/useGitPanelController.ts
++++ b/src/components/git-panel/hooks/useGitPanelController.ts
+@@ -374,7 +374,7 @@ export function useGitPanelController({
+     }
+   }, [fetchGitStatus, fetchRemoteStatus, selectedProject]);
+
+-  const switchAuthMode = useCallback(async (mode: 'https' | 'ssh' | 'unknown', tokenName?: string | null): Promise<boolean> => {
++  const switchAuthMode = useCallback(async (mode: 'https' | 'ssh' | 'unknown', tokenName?: string | null, targetHost?: string, owner?: string, repo?: string, keepBackupRemote?: boolean): Promise<boolean> => {
+     if (!selectedProject || mode === 'unknown') return false;
+     try {
+       const response = await fetchWithAuth('/api/git/auth-mode', {
+@@ -384,6 +384,10 @@ export function useGitPanelController({
+           project: selectedProject.projectId,
+           mode,
+           tokenName: tokenName || undefined,
++          targetHost: targetHost || undefined,
++          owner: owner || undefined,
++          repo: repo || undefined,
++          keepBackupRemote: keepBackupRemote || undefined,
+         }),
+       });
+       const data = await readJson<GitOperationResponse>(response);
+diff --git a/src/components/git-panel/view/GitPanelHeader.tsx b/src/components/git-panel/view/GitPanelHeader.tsx
+index 7cb14a1..c2d8e3f 100644
+--- a/src/components/git-panel/view/GitPanelHeader.tsx
++++ b/src/components/git-panel/view/GitPanelHeader.tsx
+@@ -27,7 +27,7 @@ type GitPanelHeaderProps = {
+   onPublish: () => Promise<void>;
+   onClearError: () => void;
+   onRequestConfirmation: (request: ConfirmationRequest) => void;
+-  onSwitchAuthMode: (mode: GitAuthMode, tokenName?: string | null) => Promise<boolean>;
++  onSwitchAuthMode: (mode: GitAuthMode, tokenName?: string | null, targetHost?: string, owner?: string, repo?: string, keepBackupRemote?: boolean) => Promise<boolean>;
+ };
+
+ export default function GitPanelHeader({
+@@ -304,7 +304,8 @@ export default function GitPanelHeader({
+       <AuthModeModal
+         isOpen={showAuthModal}
+         currentMode={remoteStatus?.authMode ?? 'unknown'}
+         currentTokenName={remoteStatus?.authTokenName ?? null}
++        remoteUrl={remoteStatus?.remoteUrl ?? null}
+         onClose={() => setShowAuthModal(false)}
+         onSave={onSwitchAuthMode}
+       />
+diff --git a/src/components/git-panel/view/modals/AuthModeModal.tsx b/src/components/git-panel/view/modals/AuthModeModal.tsx
+index ca6e346..f8d2e1a 100644
+--- a/src/components/git-panel/view/modals/AuthModeModal.tsx
++++ b/src/components/git-panel/view/modals/AuthModeModal.tsx
+@@ -1,5 +1,5 @@
+-import { Key, Lock, X } from 'lucide-react';
+-import { useEffect, useState } from 'react';
++import { Globe, Key, Lock, X } from 'lucide-react';
++import { useEffect, useMemo, useState } from 'react';
+ import { authenticatedFetch } from '../../../../utils/api';
+ import type { GitAuthMode } from '../../types/types';
+
+@@ -22,7 +22,14 @@ type AuthModeModalProps = {
+   currentTokenName: string | null;
+   remoteUrl?: string | null;
+   onClose: () => void;
+-  onSave: (mode: GitAuthMode, tokenName?: string | null) => Promise<boolean>;
++  onSave: (
++    mode: GitAuthMode,
++    tokenName?: string | null,
++    targetHost?: string,
++    owner?: string,
++    repo?: string,
++    keepBackupRemote?: boolean,
++  ) => Promise<boolean>;
+ };
+
+ /** Extract the host from a remote URL (https, ssh, or git@ form). */
+@@ -37,6 +44,21 @@ function detectHostFromUrl(url: string | null | undefined): string {
+   return 'github.com';
+ }
+
++/** Extract owner and repo from a remote URL. */
++function parseOwnerRepoFromUrl(url: string | null | undefined): { owner: string; repo: string } {
++  if (!url) return { owner: '', repo: '' };
++  // HTTPS: https://host/owner/repo[.git]
++  let m = url.match(/^https?:\/\/[^/]+\/([^/]+)\/(.+?)(?:\.git)?\/?$/);
++  if (m) return { owner: m[1], repo: m[2] };
++  // SSH shorthand: git@host:owner/repo[.git]
++  m = url.match(/^[^@]+@[^:]+:([^/]+)\/(.+?)(?:\.git)?$/);
++  if (m) return { owner: m[1], repo: m[2] };
++  // SSH URI: ssh://git@host[:port]/owner/repo[.git]
++  m = url.match(/^ssh:\/\/[^/]+\/([^/]+)\/(.+?)(?:\.git)?$/);
++  if (m) return { owner: m[1], repo: m[2] };
++  return { owner: '', repo: '' };
++}
++
+ export default function AuthModeModal({
+   isOpen,
+   currentMode,
+@@ -47,56 +69,96 @@ export default function AuthModeModal({
+ }: AuthModeModalProps) {
+   const [mode, setMode] = useState<GitAuthMode>(currentMode === 'unknown' ? 'https' : currentMode);
+   const [tokenName, setTokenName] = useState<string>(currentTokenName ?? '');
+-  const [tokens, setTokens] = useState<TokenRow[]>([]);
++  const [allTokens, setAllTokens] = useState<TokenRow[]>([]);
+   const [saving, setSaving] = useState(false);
+
+-  const host = detectHostFromUrl(remoteUrl);
+-  const isGitHub = host === 'github.com';
++  // Provider switch state
++  const [availableHosts, setAvailableHosts] = useState<string[]>([]);
++  const [selectedHost, setSelectedHost] = useState<string>('github.com');
++  const [owner, setOwner] = useState<string>('');
++  const [repo, setRepo] = useState<string>('');
++  const [keepBackup, setKeepBackup] = useState<boolean>(true);
+
++  const originalHost = detectHostFromUrl(remoteUrl);
++  const isProviderSwitch = selectedHost !== originalHost;
++  const isGitHub = selectedHost === 'github.com';
++
++  // Load hosts and parse current URL on open
+   useEffect(() => {
+     if (!isOpen) return;
+-    setMode(currentMode === 'unknown' ? (isGitHub ? 'https' : 'ssh') : currentMode);
++    const h = detectHostFromUrl(remoteUrl);
++    setSelectedHost(h);
++    const parsed = parseOwnerRepoFromUrl(remoteUrl);
++    setOwner(parsed.owner);
++    setRepo(parsed.repo);
++    setKeepBackup(true);
++    setMode(currentMode === 'unknown' ? (h === 'github.com' ? 'https' : 'ssh') : currentMode);
+     setTokenName(currentTokenName ?? '');
++
+     (async () => {
+       try {
+-        // Fetch both github and gitea tokens, show the ones relevant to this host
+-        const [ghRes, giteaRes] = await Promise.all([
++        // Fetch available hosts + tokens in parallel
++        const [ghRes, giteaRes, hostsRes] = await Promise.all([
+           authenticatedFetch('/api/settings/credentials?type=github_token'),
+           authenticatedFetch('/api/settings/credentials?type=gitea_token'),
++          authenticatedFetch('/api/gitea/hosts'),
+         ]);
+-        const [ghBody, giteaBody] = await Promise.all([
++        const [ghBody, giteaBody, hostsBody] = await Promise.all([
+           ghRes.json() as Promise<{ credentials?: TokenRow[] }>,
+           giteaRes.json() as Promise<{ credentials?: TokenRow[] }>,
++          hostsRes.json() as Promise<{ hosts?: string[] }>,
+         ]);
+-        const allTokens = [
++        const combined = [
+           ...(ghBody.credentials ?? []).map((t) => ({ ...t, credential_type: 'github_token', git_host: 'github.com' })),
+           ...(giteaBody.credentials ?? []).map((t) => ({ ...t, credential_type: 'gitea_token' })),
+         ];
+-        // Filter to tokens matching this host, or show all if no match
+-        const matching = allTokens.filter((t) => t.git_host === host);
+-        setTokens(matching.length > 0 ? matching : allTokens);
++        setAllTokens(combined);
++
++        const giteaHosts = (hostsBody.hosts ?? []).filter((gh: string) => gh !== 'github.com');
++        setAvailableHosts(['github.com', ...giteaHosts]);
+       } catch {
+-        setTokens([]);
++        setAllTokens([]);
++        setAvailableHosts(['github.com']);
+       }
+     })();
+-  }, [isOpen, currentMode, currentTokenName, host]);
++  }, [isOpen, currentMode, currentTokenName, remoteUrl]);
++
++  // Filter tokens to selected host
++  const tokens = useMemo(() => {
++    const matching = allTokens.filter((t) => t.git_host === selectedHost);
++    return matching.length > 0 ? matching : allTokens;
++  }, [allTokens, selectedHost]);
++
++  // When host changes, reset mode and token
++  const handleHostChange = (newHost: string) => {
++    setSelectedHost(newHost);
++    setMode(newHost === 'github.com' ? 'https' : 'ssh');
++    setTokenName('');
++  };
+
+   if (!isOpen) return null;
+
+   const save = async () => {
+     setSaving(true);
+-    const ok = await onSave(mode, mode === 'https' ? tokenName || null : null);
++    const ok = await onSave(
++      mode,
++      mode === 'https' ? tokenName || null : null,
++      isProviderSwitch ? selectedHost : undefined,
++      isProviderSwitch ? owner : undefined,
++      isProviderSwitch ? repo : undefined,
++      isProviderSwitch ? keepBackup : undefined,
++    );
+     setSaving(false);
+     if (ok) onClose();
+   };
+
+-  // Find SSH info for non-GitHub hosts
++  // Find SSH info for the selected host
+   const sshInfo = tokens.find((t) => t.ssh_host);
+   const sshDesc = isGitHub
+     ? 'Uses ~/.ssh/id_ed25519_deploy. The public key must be added on GitHub.'
+     : sshInfo
+       ? `SSH via ${sshInfo.ssh_host}:${sshInfo.ssh_port || '22'}`
+-      : `SSH to ${host}`;
++      : `SSH to ${selectedHost}`;
+
+   // For non-GitHub hosts, only show HTTPS option if at least one matching token has a stored value
+   const hasHttpsTokens = isGitHub || tokens.some((t) => t.has_token);
+@@ -114,8 +176,53 @@ export default function AuthModeModal({
+           </button>
+         </div>
+
++        {/* Provider selector */}
++        {availableHosts.length > 1 && (
++          <div className="mb-4">
++            <label className="mb-1 block text-xs font-medium text-muted-foreground">
++              <Globe className="mr-1 inline h-3 w-3" />
++              Provider
++            </label>
++            <select
++              value={selectedHost}
++              onChange={(e) => handleHostChange(e.target.value)}
++              className="w-full rounded border border-border bg-background px-2 py-1.5 text-sm"
++            >
++              {availableHosts.map((h) => (
++                <option key={h} value={h}>{h}</option>
++              ))}
++            </select>
++          </div>
++        )}
++
++        {/* Owner / Repo (editable when switching providers) */}
++        {isProviderSwitch && (
++          <div className="mb-4">
++            <label className="mb-1 block text-xs font-medium text-muted-foreground">
++              Owner / Repository
++            </label>
++            <div className="flex items-center gap-1">
++              <input
++                type="text"
++                value={owner}
++                onChange={(e) => setOwner(e.target.value)}
++                placeholder="owner"
++                className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-sm"
++              />
++              <span className="text-muted-foreground">/</span>
++              <input
++                type="text"
++                value={repo}
++                onChange={(e) => setRepo(e.target.value)}
++                placeholder="repo"
++                className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-sm"
++              />
++            </div>
++          </div>
++        )}
++
+         <p className="mb-4 text-xs text-muted-foreground">
+-          Choose how this repo authenticates to <strong>{host}</strong>. Changing mode rewrites the origin URL.
++          Choose how this repo authenticates to <strong>{selectedHost}</strong>. Changing mode rewrites the origin URL.
+         </p>
+
+         <div className="space-y-2">
+@@ -177,7 +284,7 @@ export default function AuthModeModal({
+             />
+             <div className="flex-1">
+               <div className="flex items-center gap-2 text-sm font-medium">
+-                <Lock className="h-4 w-4" /> SSH {isGitHub ? 'via VPS deploy key' : `via ${host}`}
++                <Lock className="h-4 w-4" /> SSH {isGitHub ? 'via VPS deploy key' : `via ${selectedHost}`}
+               </div>
+               <p className="mt-1 text-xs text-muted-foreground">
+                 {sshDesc}
+@@ -186,7 +293,21 @@ export default function AuthModeModal({
+           </label>
+         </div>
+
++        {/* Backup remote checkbox (only when switching providers) */}
++        {isProviderSwitch && (
++          <label className="mt-3 flex cursor-pointer items-center gap-2 rounded-lg border border-dashed border-border p-3">
++            <input
++              type="checkbox"
++              checked={keepBackup}
++              onChange={(e) => setKeepBackup(e.target.checked)}
++            />
++            <span className="text-xs text-muted-foreground">
++              Keep old remote as backup (<code>{originalHost.replace(/\./g, '-')}</code>)
++            </span>
++          </label>
++        )}
++
+         <div className="mt-5 flex justify-end gap-2">
+           <button
+             onClick={onClose}

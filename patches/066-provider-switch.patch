@@ -438,7 +438,7 @@ index ca6e346..f8d2e1a 100644
                </div>
                <p className="mt-1 text-xs text-muted-foreground">
                  {sshDesc}
-@@ -186,7 +293,21 @@ export default function AuthModeModal({
+@@ -186,8 +293,22 @@ export default function AuthModeModal({
            </label>
          </div>
 
@@ -459,3 +459,4 @@ index ca6e346..f8d2e1a 100644
          <div className="mt-5 flex justify-end gap-2">
            <button
              onClick={onClose}
+             className="rounded-lg border border-border px-4 py-2 text-sm hover:bg-accent"

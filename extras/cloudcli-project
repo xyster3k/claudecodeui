@@ -1,5 +1,7 @@
 #!/bin/bash
-# cloudcli-project — per-project git identity and GitHub token overrides.
+# cloudcli-project — per-project git identity and token overrides.
+#
+# Multi-host support: works with GitHub, Gitea, GitLab, and any HTTPS/SSH git host.
 #
 # Auto-detects the project from the current working directory. No need to type
 # paths or tokens. Token overrides route via CloudCLI's token DB (the same
@@ -20,15 +22,14 @@
 #   cloudcli-project clear <project>                    # same, for named project
 #   cloudcli-project clear-identity [project]           # clear only identity
 #   cloudcli-project clear-token [project]              # clear only token routing
-#   cloudcli-project use-ssh [project]                  # switch remote to git@github.com:... (SSH auth via deploy key)
+#   cloudcli-project use-ssh [project]                  # switch remote to SSH auth
 #   cloudcli-project use-https [project] [token-name]   # switch remote to https:// and (optionally) scope to a named token
-#   cloudcli-project ssh-test                           # check VPS deploy key auth against github.com
+#   cloudcli-project ssh-test [host]                    # check SSH auth against a host (default: github.com)
 
 set -u
 
 PROJECTS_ROOT="${PROJECTS_ROOT:-/home/node/projects}"
 DB="${CLOUDCLI_DB:-/home/node/.cloudcli/auth.db}"
-REMOTE="${CLOUDCLI_REMOTE_URL:-https://github.com}"
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -63,33 +64,159 @@ resolve_repo() {
 	die "project not found: $arg  (looked in $PROJECTS_ROOT/ for a directory with .git)"
 }
 
-# Return the github remote URL used to scope credential routing.
+# Return the remote URL used to scope credential routing (strip any embedded user@).
 remote_of() {
 	local repo="$1"
 	git -C "$repo" remote get-url origin 2>/dev/null | sed -E 's|://[^@]+@|://|'
 }
 
+# Detect the host from a remote URL.
+# Supports: https://host/..., git@host:..., ssh://git@host:port/...
+detect_host() {
+	local url="$1"
+	if [[ "$url" =~ ^https?://([^/:]+) ]]; then
+		printf '%s' "${BASH_REMATCH[1]}"
+	elif [[ "$url" =~ ^ssh://[^@]+@([^/:]+) ]]; then
+		printf '%s' "${BASH_REMATCH[1]}"
+	elif [[ "$url" =~ ^[^@]+@([^:]+): ]]; then
+		printf '%s' "${BASH_REMATCH[1]}"
+	fi
+}
+
+# Extract owner/repo from a URL (works for any host).
+# Returns "owner/repo" or empty string.
+extract_owner_repo() {
+	local url="$1"
+	local path=""
+	if [[ "$url" =~ ^https?://[^/]+/(.+)$ ]]; then
+		path="${BASH_REMATCH[1]}"
+	elif [[ "$url" =~ ^ssh://[^/]+/(.+)$ ]]; then
+		path="${BASH_REMATCH[1]}"
+	elif [[ "$url" =~ ^[^@]+@[^:]+:(.+)$ ]]; then
+		path="${BASH_REMATCH[1]}"
+	fi
+	# Strip trailing / and .git
+	path="${path%/}"
+	path="${path%.git}"
+	printf '%s' "$path"
+}
+
+# Look up the SSH host and port for a given HTTPS host from the DB.
+# Returns "ssh_host:ssh_port" or empty.
+get_ssh_info() {
+	local https_host="$1"
+	[ -r "$DB" ] || return
+	# For Gitea tokens, we store ssh_host/ssh_port info.
+	# Try to find a token that has this git_host and extract any ssh metadata.
+	# Convention: gitea_token type stores git_host=<https_host>
+	# We look for known patterns:
+	case "$https_host" in
+		github.com)
+			printf 'github.com:22'
+			;;
+		*)
+			# Check if there's SSH info stored for this host
+			local ssh_host ssh_port
+			ssh_host=$(sqlite3 -noheader -batch "$DB" \
+				"SELECT DISTINCT ssh_host FROM user_credentials WHERE git_host=$(sql_str "$https_host") AND ssh_host IS NOT NULL LIMIT 1;" 2>/dev/null)
+			ssh_port=$(sqlite3 -noheader -batch "$DB" \
+				"SELECT DISTINCT ssh_port FROM user_credentials WHERE git_host=$(sql_str "$https_host") AND ssh_port IS NOT NULL LIMIT 1;" 2>/dev/null)
+			if [ -n "$ssh_host" ]; then
+				printf '%s:%s' "$ssh_host" "${ssh_port:-22}"
+			fi
+			;;
+	esac
+}
+
+# Convert a URL to SSH form (works for any host).
+to_ssh_url() {
+	local u="$1"
+	# Already SSH
+	if [[ "$u" =~ ^git@|^ssh:// ]]; then printf '%s' "$u"; return; fi
+
+	local host owner_repo
+	host=$(detect_host "$u")
+	owner_repo=$(extract_owner_repo "$u")
+	[ -n "$host" ] && [ -n "$owner_repo" ] || { printf '%s' "$u"; return; }
+
+	if [ "$host" = "github.com" ]; then
+		# GitHub uses git@github.com:owner/repo.git format
+		printf 'git@github.com:%s.git' "$owner_repo"
+	else
+		# Non-GitHub: use ssh://git@host:port/owner/repo.git format
+		local ssh_info
+		ssh_info=$(get_ssh_info "$host")
+		if [ -n "$ssh_info" ]; then
+			local ssh_host="${ssh_info%%:*}"
+			local ssh_port="${ssh_info#*:}"
+			if [ "$ssh_port" = "22" ]; then
+				printf 'git@%s:%s.git' "$ssh_host" "$owner_repo"
+			else
+				printf 'ssh://git@%s:%s/%s.git' "$ssh_host" "$ssh_port" "$owner_repo"
+			fi
+		else
+			# Fallback: use the same host with standard SSH
+			printf 'git@%s:%s.git' "$host" "$owner_repo"
+		fi
+	fi
+}
+
+# Convert SSH to HTTPS form (works for any host).
+to_https_url() {
+	local u="$1"
+	# Already HTTPS
+	if [[ "$u" =~ ^https?:// ]]; then printf '%s' "$u"; return; fi
+
+	local owner_repo=""
+	local host=""
+
+	if [[ "$u" =~ ^ssh://[^@]+@([^/:]+)(:[0-9]+)?/(.+)$ ]]; then
+		host="${BASH_REMATCH[1]}"
+		owner_repo="${BASH_REMATCH[3]}"
+	elif [[ "$u" =~ ^[^@]+@([^:]+):(.+)$ ]]; then
+		host="${BASH_REMATCH[1]}"
+		owner_repo="${BASH_REMATCH[2]}"
+	fi
+
+	owner_repo="${owner_repo%.git}"
+	owner_repo="${owner_repo%/}"
+
+	if [ -n "$host" ] && [ -n "$owner_repo" ]; then
+		# For SSH hosts that differ from the HTTPS host (e.g., git.example.com → gitea.example.com),
+		# try to find the HTTPS host from the DB
+		local https_host="$host"
+		if [ -r "$DB" ]; then
+			local db_host
+			db_host=$(sqlite3 -noheader -batch "$DB" \
+				"SELECT DISTINCT git_host FROM user_credentials WHERE ssh_host=$(sql_str "$host") LIMIT 1;" 2>/dev/null)
+			[ -n "$db_host" ] && https_host="$db_host"
+		fi
+		printf 'https://%s/%s' "$https_host" "$owner_repo"
+	else
+		printf '%s' "$u"
+	fi
+}
+
 # ---- commands ---------------------------------------------------------------
 
 cmd_help() {
-	sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 cmd_list() {
-	printf '%-24s %-18s %-40s %-12s\n' 'PROJECT' 'IDENTITY' 'EMAIL' 'TOKEN'
-	printf '%-24s %-18s %-40s %-12s\n' '------------------------' '------------------' '----------------------------------------' '------------'
+	printf '%-24s %-18s %-40s %-12s %-25s\n' 'PROJECT' 'IDENTITY' 'EMAIL' 'TOKEN' 'HOST'
+	printf '%-24s %-18s %-40s %-12s %-25s\n' '------------------------' '------------------' '----------------------------------------' '------------' '-------------------------'
 	for d in "$PROJECTS_ROOT"/*/; do
 		[ -d "$d/.git" ] || continue
-		local name n e t remote
+		local name n e t remote host
 		name=$(basename "$d")
 		n=$(git -C "$d" config --local --get user.name 2>/dev/null)
 		e=$(git -C "$d" config --local --get user.email 2>/dev/null)
 		remote=$(git -C "$d" remote get-url origin 2>/dev/null | sed -E 's|://[^@]+@|://|')
+		host=$(detect_host "$remote")
 		t=$(git -C "$d" config --local --get "credential.${remote%.git}.git.username" 2>/dev/null)
-		printf '%-24s %-18s %-40s %-12s\n' "${name:0:24}" "${n:-<global>}" "${e:-<global>}" "${t:-<global>}"
+		printf '%-24s %-18s %-40s %-12s %-25s\n' "${name:0:24}" "${n:-<global>}" "${e:-<global>}" "${t:-<global>}" "${host:-<unknown>}"
 	done
-	echo
-	echo "(VPN routing is host-side — run 'vps-vpn routes' on the VPS to see which tunnels cover which subnets)"
 }
 
 cmd_projects() {
@@ -102,10 +229,13 @@ cmd_projects() {
 cmd_tokens() {
 	[ -r "$DB" ] || die "CloudCLI DB not readable at $DB"
 	echo "Tokens available (from Settings → API & Tokens):"
-	# Show per-token git identity when present
+	# Show per-token info including host and identity
 	sqlite3 -noheader -batch "$DB" \
-		"SELECT '  ' || credential_name || '  (' ||
+		"SELECT '  ' || credential_name ||
+		    '  [' || COALESCE(git_host, 'github.com') || ']' ||
+		    '  (' ||
 		    CASE is_active WHEN 1 THEN 'active' ELSE 'inactive' END ||
+		    ', ' || credential_type ||
 		    ', added ' || substr(created_at,1,10) || ')' ||
 		    CASE
 		        WHEN git_name IS NOT NULL AND git_email IS NOT NULL
@@ -117,8 +247,8 @@ cmd_tokens() {
 		        ELSE ''
 		    END
 		 FROM user_credentials
-		 WHERE credential_type='github_token'
-		 ORDER BY created_at DESC;" 2>/dev/null
+		 WHERE credential_type IN ('github_token', 'gitea_token')
+		 ORDER BY git_host, created_at DESC;" 2>/dev/null
 	echo
 	echo "Use the token NAME (first column) when running: cloudcli-project token <name>"
 	echo "Tokens without a per-token identity fall back to the global Settings → Git values."
@@ -127,15 +257,17 @@ cmd_tokens() {
 cmd_show() {
 	local repo
 	repo=$(resolve_repo "${1:-}")
-	local n e remote t
+	local n e remote t host
 	n=$(git -C "$repo" config --local --get user.name 2>/dev/null)
 	e=$(git -C "$repo" config --local --get user.email 2>/dev/null)
 	remote=$(remote_of "$repo")
+	host=$(detect_host "$remote")
 	t=$(git -C "$repo" config --local --get "credential.${remote%.git}.git.username" 2>/dev/null)
 
 	echo "project:    $(basename "$repo")"
 	echo "path:       $repo"
 	echo "remote:     ${remote:-<none>}"
+	echo "host:       ${host:-<unknown>}"
 	echo
 	echo "OVERRIDES (empty = fall back to global Settings):"
 	echo "  user.name:  ${n:-<global>}"
@@ -184,7 +316,7 @@ cmd_token() {
 	local quoted
 	quoted=$(sql_str "$token")
 	exists=$(sqlite3 -noheader -batch "$DB" \
-		"SELECT COUNT(*) FROM user_credentials WHERE credential_type='github_token' AND credential_name=$quoted;" 2>/dev/null || echo 0)
+		"SELECT COUNT(*) FROM user_credentials WHERE credential_type IN ('github_token', 'gitea_token') AND credential_name=$quoted;" 2>/dev/null || echo 0)
 	[ "$exists" -ge 1 ] || die "no token named '$token' in CloudCLI Settings → API & Tokens. Run 'cloudcli-project tokens' to see what's available, or add it in the UI first."
 
 	local remote
@@ -220,55 +352,31 @@ cmd_clear_identity() {
 	echo "identity override cleared on $(basename "$repo")."
 }
 
-# Convert a github URL to SSH form (https://github.com/u/r[.git] -> git@github.com:u/r.git) or leave unchanged.
-# Note: bash ERE doesn't support non-greedy quantifiers, so strip suffixes via shell parameter expansion.
-to_ssh_url() {
-	local u="$1"
-	if [[ "$u" =~ ^git@|^ssh:// ]]; then printf '%s' "$u"; return; fi
-	if [[ "$u" =~ ^https?://github\.com/([^/]+)/(.+)$ ]]; then
-		local owner="${BASH_REMATCH[1]}"
-		local repo="${BASH_REMATCH[2]}"
-		repo="${repo%/}"            # drop trailing slash
-		repo="${repo%.git}"         # drop .git suffix (once)
-		printf 'git@github.com:%s/%s.git' "$owner" "$repo"
-		return
-	fi
-	printf '%s' "$u"
-}
-
-# Convert ssh to https form
-to_https_url() {
-	local u="$1"
-	if [[ "$u" =~ ^https?://github\.com ]]; then printf '%s' "$u"; return; fi
-	if [[ "$u" =~ ^git@github\.com:([^/]+)/(.+)$ ]]; then
-		local owner="${BASH_REMATCH[1]}"
-		local repo="${BASH_REMATCH[2]}"
-		repo="${repo%.git}"
-		printf 'https://github.com/%s/%s' "$owner" "$repo"
-		return
-	fi
-	printf '%s' "$u"
-}
-
 cmd_use_ssh() {
 	local repo
 	repo=$(resolve_repo "${1:-}")
-	local cur ssh
+	local cur ssh_url
 	cur=$(git -C "$repo" remote get-url origin 2>/dev/null)
 	[ -n "$cur" ] || die "repo has no origin remote"
-	ssh=$(to_ssh_url "$cur")
-	git -C "$repo" remote set-url origin "$ssh"
+	ssh_url=$(to_ssh_url "$cur")
+	git -C "$repo" remote set-url origin "$ssh_url"
 	# SSH auth doesn't go through our credential helper — strip any credential.<url>.username leftover
 	local remote_clean
 	remote_clean=$(echo "$cur" | sed -E 's|://[^@]+@|://|; s|/$||; s|\.git$||')
 	git -C "$repo" config --local --remove-section "credential.${remote_clean}.git" 2>/dev/null || true
 	git -C "$repo" config --local --remove-section "credential.${remote_clean}" 2>/dev/null || true
-	echo "$(basename "$repo") → SSH via ~/.ssh/id_ed25519_deploy"
-	echo "remote is now: $ssh"
+	local host
+	host=$(detect_host "$ssh_url")
+	echo "$(basename "$repo") → SSH"
+	echo "remote is now: $ssh_url"
 	echo
-	echo "Reminder: the deploy public key must be added to your GitHub account:"
-	echo "  https://github.com/settings/ssh/new"
-	echo "Test with: cloudcli-project ssh-test"
+	if [ "$host" = "github.com" ]; then
+		echo "Reminder: the SSH public key must be added to your GitHub account:"
+		echo "  https://github.com/settings/ssh/new"
+	else
+		echo "Reminder: the SSH public key must be added to your $host account."
+	fi
+	echo "Test with: cloudcli-project ssh-test $host"
 }
 
 cmd_use_https() {
@@ -285,13 +393,13 @@ cmd_use_https() {
 	else
 		repo=$(resolve_repo ""); token=""
 	fi
-	local cur https
+	local cur https_url
 	cur=$(git -C "$repo" remote get-url origin 2>/dev/null)
 	[ -n "$cur" ] || die "repo has no origin remote"
-	https=$(to_https_url "$cur")
-	git -C "$repo" remote set-url origin "$https"
+	https_url=$(to_https_url "$cur")
+	git -C "$repo" remote set-url origin "$https_url"
 	echo "$(basename "$repo") → HTTPS"
-	echo "remote is now: $https"
+	echo "remote is now: $https_url"
 	if [ -n "$token" ]; then
 		cmd_token "$(basename "$repo")" "$token"
 	else
@@ -300,18 +408,43 @@ cmd_use_https() {
 }
 
 cmd_ssh_test() {
-	echo "Testing SSH auth to git@github.com..."
-	# ssh -T to github.com returns exit 1 on success with message "Hi <user>!"
+	local host="${1:-github.com}"
+	local port="22"
+	local ssh_target="git@$host"
+
+	# For non-standard hosts, check the DB for SSH port
+	if [ "$host" != "github.com" ] && [ -r "$DB" ]; then
+		local db_port
+		db_port=$(sqlite3 -noheader -batch "$DB" \
+			"SELECT DISTINCT ssh_port FROM user_credentials WHERE ssh_host=$(sql_str "$host") AND ssh_port IS NOT NULL LIMIT 1;" 2>/dev/null)
+		[ -n "$db_port" ] && port="$db_port"
+		# Also check if host is actually an HTTPS host and we need to find the SSH host
+		local ssh_host
+		ssh_host=$(sqlite3 -noheader -batch "$DB" \
+			"SELECT DISTINCT ssh_host FROM user_credentials WHERE git_host=$(sql_str "$host") AND ssh_host IS NOT NULL LIMIT 1;" 2>/dev/null)
+		if [ -n "$ssh_host" ]; then
+			ssh_target="git@$ssh_host"
+			db_port=$(sqlite3 -noheader -batch "$DB" \
+				"SELECT DISTINCT ssh_port FROM user_credentials WHERE git_host=$(sql_str "$host") AND ssh_port IS NOT NULL LIMIT 1;" 2>/dev/null)
+			[ -n "$db_port" ] && port="$db_port"
+			echo "HTTPS host: $host → SSH host: $ssh_host:$port"
+		fi
+	fi
+
+	echo "Testing SSH auth to $ssh_target (port $port)..."
 	local out
-	out=$(ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -T git@github.com 2>&1 || true)
+	out=$(ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p "$port" -T "$ssh_target" 2>&1 || true)
 	echo "$out"
-	if echo "$out" | grep -q 'successfully authenticated'; then
+	if echo "$out" | grep -qi 'successfully authenticated\|Hi '; then
 		echo
 		echo "✓ SSH auth works — you can use 'cloudcli-project use-ssh' on any repo"
 	else
 		echo
-		echo "✗ SSH auth failed. Add this public key to https://github.com/settings/ssh/new :"
-		cat /home/node/.ssh/id_ed25519_deploy.pub 2>/dev/null || echo "(deploy pubkey not found at /home/node/.ssh/id_ed25519_deploy.pub)"
+		echo "✗ SSH auth failed. Add your public key to $host."
+		if [ -f /home/node/.ssh/id_ed25519_deploy.pub ]; then
+			echo "Public key:"
+			cat /home/node/.ssh/id_ed25519_deploy.pub
+		fi
 	fi
 }
 
@@ -342,6 +475,6 @@ case "${1:-help}" in
 	clear-token)             shift; cmd_clear_token "$@" ;;
 	use-ssh)                 shift; cmd_use_ssh "$@" ;;
 	use-https)               shift; cmd_use_https "$@" ;;
-	ssh-test)                cmd_ssh_test ;;
+	ssh-test)                shift; cmd_ssh_test "$@" ;;
 	*)                       die "unknown command: $1  (run 'cloudcli-project' for help)" ;;
 esac

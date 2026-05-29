@@ -52,7 +52,7 @@ index 685bf7e..a1b2c3d 100755
 +    return { mode: 'unknown', tokenName: null, remoteUrl: null };
    }
  }
-
+ 
 @@ -1217,7 +1220,7 @@ router.get('/remote-status', async (req, res) => {
   * POST /api/git/auth-mode  { project: string, mode: 'https' | 'ssh', tokenName?: string }
   */
@@ -61,11 +61,11 @@ index 685bf7e..a1b2c3d 100755
 +  const { project, mode, tokenName, targetHost, owner: newOwner, repo: newRepo, keepBackupRemote } = req.body || {};
    if (!project)        return res.status(400).json({ error: 'Project name is required' });
    if (mode !== 'https' && mode !== 'ssh') return res.status(400).json({ error: "mode must be 'https' or 'ssh'" });
-
+ 
 @@ -1247,44 +1250,70 @@ router.post('/auth-mode', async (req, res) => {
        return res.status(400).json({ error: 'Could not parse owner/repo from origin URL' });
      }
-
+ 
 +    // Provider switch: override host and ownerRepo if targetHost is provided
 +    let finalHost = host;
 +    let finalOwnerRepo = ownerRepo;
@@ -112,7 +112,7 @@ index 685bf7e..a1b2c3d 100755
          }
        } catch (_) {}
      }
-
+ 
      // Determine the HTTPS host for this remote (for SSH hosts, look up the HTTPS host)
 -    let httpsHost = host;
 -    if (host !== 'github.com' && mode === 'https') {
@@ -129,7 +129,7 @@ index 685bf7e..a1b2c3d 100755
 +        if (row) httpsHost = row.git_host || finalHost;
        } catch (_) {}
      }
-
+ 
 -    const httpsClean = `https://${httpsHost}/${ownerRepo}`;
 +    const httpsClean = `https://${httpsHost}/${finalOwnerRepo}`;
      let sshUrl;
@@ -145,7 +145,7 @@ index 685bf7e..a1b2c3d 100755
 +      sshUrl = `ssh://git@${sshHost}:${sshPort}/${finalOwnerRepo}.git`;
      }
      const targetUrl = mode === 'ssh' ? sshUrl : `${httpsClean}.git`;
-
+ 
 diff --git a/src/components/git-panel/types/types.ts b/src/components/git-panel/types/types.ts
 index d96bd25..e3f4a12 100644
 --- a/src/components/git-panel/types/types.ts
@@ -156,7 +156,7 @@ index d96bd25..e3f4a12 100644
    authTokenName?: string | null;
 +  remoteUrl?: string | null;
  };
-
+ 
  export type GitCommitSummary = {
 @@ -108,5 +109,5 @@ export type GitPanelController = {
    commitChanges: (message: string, files: string[]) => Promise<boolean>;
@@ -172,7 +172,7 @@ index c5d7e88..b4e1f2a 100644
 @@ -374,7 +374,7 @@ export function useGitPanelController({
      }
    }, [fetchGitStatus, fetchRemoteStatus, selectedProject]);
-
+ 
 -  const switchAuthMode = useCallback(async (mode: 'https' | 'ssh' | 'unknown', tokenName?: string | null): Promise<boolean> => {
 +  const switchAuthMode = useCallback(async (mode: 'https' | 'ssh' | 'unknown', tokenName?: string | null, targetHost?: string, owner?: string, repo?: string, keepBackupRemote?: boolean): Promise<boolean> => {
      if (!selectedProject || mode === 'unknown') return false;
@@ -200,7 +200,7 @@ index 7cb14a1..c2d8e3f 100644
 -  onSwitchAuthMode: (mode: GitAuthMode, tokenName?: string | null) => Promise<boolean>;
 +  onSwitchAuthMode: (mode: GitAuthMode, tokenName?: string | null, targetHost?: string, owner?: string, repo?: string, keepBackupRemote?: boolean) => Promise<boolean>;
  };
-
+ 
  export default function GitPanelHeader({
 @@ -304,7 +304,8 @@ export default function GitPanelHeader({
        <AuthModeModal
@@ -222,7 +222,7 @@ index ca6e346..f8d2e1a 100644
 +import { useEffect, useMemo, useState } from 'react';
  import { authenticatedFetch } from '../../../../utils/api';
  import type { GitAuthMode } from '../../types/types';
-
+ 
 @@ -22,7 +22,14 @@ type AuthModeModalProps = {
    currentTokenName: string | null;
    remoteUrl?: string | null;
@@ -237,12 +237,12 @@ index ca6e346..f8d2e1a 100644
 +    keepBackupRemote?: boolean,
 +  ) => Promise<boolean>;
  };
-
+ 
  /** Extract the host from a remote URL (https, ssh, or git@ form). */
 @@ -37,6 +44,21 @@ function detectHostFromUrl(url: string | null | undefined): string {
    return 'github.com';
  }
-
+ 
 +/** Extract owner and repo from a remote URL. */
 +function parseOwnerRepoFromUrl(url: string | null | undefined): { owner: string; repo: string } {
 +  if (!url) return { owner: '', repo: '' };
@@ -268,7 +268,7 @@ index ca6e346..f8d2e1a 100644
 -  const [tokens, setTokens] = useState<TokenRow[]>([]);
 +  const [allTokens, setAllTokens] = useState<TokenRow[]>([]);
    const [saving, setSaving] = useState(false);
-
+ 
 -  const host = detectHostFromUrl(remoteUrl);
 -  const isGitHub = host === 'github.com';
 +  // Provider switch state
@@ -277,7 +277,7 @@ index ca6e346..f8d2e1a 100644
 +  const [owner, setOwner] = useState<string>('');
 +  const [repo, setRepo] = useState<string>('');
 +  const [keepBackup, setKeepBackup] = useState<boolean>(true);
-
+ 
 +  const originalHost = detectHostFromUrl(remoteUrl);
 +  const isProviderSwitch = selectedHost !== originalHost;
 +  const isGitHub = selectedHost === 'github.com';
@@ -344,9 +344,9 @@ index ca6e346..f8d2e1a 100644
 +    setMode(newHost === 'github.com' ? 'https' : 'ssh');
 +    setTokenName('');
 +  };
-
+ 
    if (!isOpen) return null;
-
+ 
    const save = async () => {
      setSaving(true);
 -    const ok = await onSave(mode, mode === 'https' ? tokenName || null : null);
@@ -361,7 +361,7 @@ index ca6e346..f8d2e1a 100644
      setSaving(false);
      if (ok) onClose();
    };
-
+ 
 -  // Find SSH info for non-GitHub hosts
 +  // Find SSH info for the selected host
    const sshInfo = tokens.find((t) => t.ssh_host);
@@ -371,13 +371,13 @@ index ca6e346..f8d2e1a 100644
        ? `SSH via ${sshInfo.ssh_host}:${sshInfo.ssh_port || '22'}`
 -      : `SSH to ${host}`;
 +      : `SSH to ${selectedHost}`;
-
+ 
    // For non-GitHub hosts, only show HTTPS option if at least one matching token has a stored value
    const hasHttpsTokens = isGitHub || tokens.some((t) => t.has_token);
 @@ -114,8 +176,53 @@ export default function AuthModeModal({
            </button>
          </div>
-
+ 
 +        {/* Provider selector */}
 +        {availableHosts.length > 1 && (
 +          <div className="mb-4">
@@ -427,7 +427,7 @@ index ca6e346..f8d2e1a 100644
 -          Choose how this repo authenticates to <strong>{host}</strong>. Changing mode rewrites the origin URL.
 +          Choose how this repo authenticates to <strong>{selectedHost}</strong>. Changing mode rewrites the origin URL.
          </p>
-
+ 
          <div className="space-y-2">
 @@ -177,7 +284,7 @@ export default function AuthModeModal({
              />
@@ -441,7 +441,7 @@ index ca6e346..f8d2e1a 100644
 @@ -186,8 +293,22 @@ export default function AuthModeModal({
            </label>
          </div>
-
+ 
 +        {/* Backup remote checkbox (only when switching providers) */}
 +        {isProviderSwitch && (
 +          <label className="mt-3 flex cursor-pointer items-center gap-2 rounded-lg border border-dashed border-border p-3">

@@ -460,3 +460,4 @@ index ca6e346..f8d2e1a 100644
            <button
              onClick={onClose}
              className="rounded-lg border border-border px-4 py-2 text-sm hover:bg-accent"
+           >

@@ -1,0 +1,119 @@
+diff --git a/server/builder-mode.js b/server/builder-mode.js
+index cf48fef..a1b2c3e 100644
+--- a/server/builder-mode.js
++++ b/server/builder-mode.js
+@@ -10,6 +10,8 @@ import { abortCursorSession, spawnCursor } from './cursor-cli.js';
+ import { abortCodexSession, queryCodex } from './openai-codex.js';
+ import { abortGeminiSession, spawnGemini } from './gemini-cli.js';
+
++const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '/root';
++
+ const TASKMASTER_DIR = '.taskmaster';
+ const BUILDER_ARTIFACT_DIR = '.cloudcli/builder-runs';
+ const GLOBAL_BUILDER_CONFIG_PATH = process.env.CLOUDCLI_BUILDER_CONFIG
+@@ -57,6 +59,73 @@ const DOCKER_ENVIRONMENT_NOTICE = [
+
+ ].join('\n');
+
++// ---- Project context loading ----
++// Reads CLAUDE.md files + memory so builder sessions have the same context as normal sessions.
++
++const readFileOrEmpty = async (filePath) => {
++  try {
++    const content = await fs.readFile(filePath, 'utf8');
++    return content.trim();
++  } catch {
++    return '';
++  }
++};
++
++const loadProjectContext = async (projectPath) => {
++  const sections = [];
++
++  // 1. Global user instructions: ~/.claude/CLAUDE.md
++  const globalClaudeMd = await readFileOrEmpty(path.join(HOME_DIR, '.claude', 'CLAUDE.md'));
++  if (globalClaudeMd) {
++    sections.push(`### Global User Instructions (~/.claude/CLAUDE.md)\n${globalClaudeMd}`);
++  }
++
++  // 2. Project CLAUDE.md (root)
++  const projectClaudeMd = await readFileOrEmpty(path.join(projectPath, 'CLAUDE.md'));
++  if (projectClaudeMd) {
++    sections.push(`### Project Instructions (CLAUDE.md)\n${projectClaudeMd}`);
++  }
++
++  // 3. Project .claude/CLAUDE.md
++  const dotClaudeMd = await readFileOrEmpty(path.join(projectPath, '.claude', 'CLAUDE.md'));
++  if (dotClaudeMd) {
++    sections.push(`### Project Instructions (.claude/CLAUDE.md)\n${dotClaudeMd}`);
++  }
++
++  // 4. Memory files — project-specific memory dir
++  const projectMemoryDir = path.join(projectPath, '.claude', 'memory');
++  try {
++    const memFiles = await fs.readdir(projectMemoryDir);
++    for (const file of memFiles.filter((f) => f.endsWith('.md')).sort()) {
++      const content = await readFileOrEmpty(path.join(projectMemoryDir, file));
++      if (content) {
++        sections.push(`### Project Memory (${file})\n${content}`);
++      }
++    }
++  } catch { /* directory doesn't exist */ }
++
++  // 5. Global memory — project-specific directory under ~/.claude/projects/
++  const sanitizedProjectPath = projectPath.replace(/\//g, '-');
++  const globalMemoryDir = path.join(HOME_DIR, '.claude', 'projects', sanitizedProjectPath, 'memory');
++  try {
++    const memFiles = await fs.readdir(globalMemoryDir);
++    for (const file of memFiles.filter((f) => f.endsWith('.md')).sort()) {
++      const content = await readFileOrEmpty(path.join(globalMemoryDir, file));
++      if (content) {
++        sections.push(`### User Memory (${file})\n${content}`);
++      }
++    }
++  } catch { /* directory doesn't exist */ }
++
++  if (sections.length === 0) {
++    return '';
++  }
++
++  return [
++    '## Project Context & Instructions',
++    '',
++    'The following project instructions, rules, and memory were loaded from the project CLAUDE.md files.',
++    'Follow these instructions carefully — they contain SSH credentials, deploy steps, server addresses,',
++    'coding conventions, and other critical context for this project.',
++    '',
++    ...sections,
++    '',
++  ].join('\n');
++};
++
+
+ const PROVIDER_RUNNERS = {
+   claude: queryClaudeSDK,
+@@ -1083,7 +1152,11 @@ class BufferedWriter {
+
+ const runProviderTask = async ({ provider, prompt, options, writer }) => {
++  const projectContext = options?.projectContext || '';
+   const effectiveProvider = (options.model && providerForModel(options.model)) || provider;
+   const runner = PROVIDER_RUNNERS[effectiveProvider] || queryClaudeSDK;
+-  await runner(prompt, {
++  const fullPrompt = projectContext
++    ? `${projectContext}\n\n---\n\n${prompt}`
++    : prompt;
++  await runner(fullPrompt, {
+     ...options,
+     workflowMode: 'chat',
+     permissionMode: options.permissionMode || 'bypassPermissions',
+@@ -1886,6 +1959,10 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+
+   try {
+     const globalConfig = await readJsonFile(GLOBAL_BUILDER_CONFIG_PATH);
++
++    // Load project context (CLAUDE.md files + memory) once — flows into all sessions via options spread
++    options.projectContext = await loadProjectContext(projectPath);
++
+     const { packageConfig } = await detectProjectScripts(projectPath);
+     const projectConfig = await readJsonFile(path.join(projectPath, '.cloudcli', 'builder.json'));
+     const builderConfig = withDefaultBuilderConfig(mergeBuilderConfig(globalConfig, packageConfig, projectConfig));

@@ -2,19 +2,18 @@ diff --git a/server/builder-mode.js b/server/builder-mode.js
 index cf48fef..a1b2c3e 100644
 --- a/server/builder-mode.js
 +++ b/server/builder-mode.js
-@@ -10,6 +10,8 @@ import { abortCursorSession, spawnCursor } from './cursor-cli.js';
- import { abortCodexSession, queryCodex } from './openai-codex.js';
- import { abortGeminiSession, spawnGemini } from './gemini-cli.js';
-
+@@ -12,5 +12,7 @@
+ import { removeDetachableWriter } from './builder-detachable-writer.js';
+ 
 +const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '/root';
 +
  const TASKMASTER_DIR = '.taskmaster';
  const BUILDER_ARTIFACT_DIR = '.cloudcli/builder-runs';
  const GLOBAL_BUILDER_CONFIG_PATH = process.env.CLOUDCLI_BUILDER_CONFIG
-@@ -57,6 +59,73 @@ const DOCKER_ENVIRONMENT_NOTICE = [
-
+@@ -57,6 +59,81 @@
  ].join('\n');
-
+ 
+ 
 +// ---- Project context loading ----
 +// Reads CLAUDE.md files + memory so builder sessions have the same context as normal sessions.
 +
@@ -48,7 +47,7 @@ index cf48fef..a1b2c3e 100644
 +    sections.push(`### Project Instructions (.claude/CLAUDE.md)\n${dotClaudeMd}`);
 +  }
 +
-+  // 4. Memory files — project-specific memory dir
++  // 4. Memory files - project-specific memory dir
 +  const projectMemoryDir = path.join(projectPath, '.claude', 'memory');
 +  try {
 +    const memFiles = await fs.readdir(projectMemoryDir);
@@ -60,7 +59,7 @@ index cf48fef..a1b2c3e 100644
 +    }
 +  } catch { /* directory doesn't exist */ }
 +
-+  // 5. Global memory — project-specific directory under ~/.claude/projects/
++  // 5. Global memory - project-specific directory under ~/.claude/projects/
 +  const sanitizedProjectPath = projectPath.replace(/\//g, '-');
 +  const globalMemoryDir = path.join(HOME_DIR, '.claude', 'projects', sanitizedProjectPath, 'memory');
 +  try {
@@ -81,7 +80,7 @@ index cf48fef..a1b2c3e 100644
 +    '## Project Context & Instructions',
 +    '',
 +    'The following project instructions, rules, and memory were loaded from the project CLAUDE.md files.',
-+    'Follow these instructions carefully — they contain SSH credentials, deploy steps, server addresses,',
++    'Follow these instructions carefully - they contain SSH credentials, deploy steps, server addresses,',
 +    'coding conventions, and other critical context for this project.',
 +    '',
 +    ...sections,
@@ -89,11 +88,12 @@ index cf48fef..a1b2c3e 100644
 +  ].join('\n');
 +};
 +
-
++
  const PROVIDER_RUNNERS = {
    claude: queryClaudeSDK,
-@@ -1083,7 +1152,11 @@ class BufferedWriter {
-
+   cursor: spawnCursor,
+@@ -1083,8 +1159,12 @@
+ 
  const runProviderTask = async ({ provider, prompt, options, writer }) => {
 +  const projectContext = options?.projectContext || '';
    const effectiveProvider = (options.model && providerForModel(options.model)) || provider;
@@ -106,14 +106,13 @@ index cf48fef..a1b2c3e 100644
      ...options,
      workflowMode: 'chat',
      permissionMode: options.permissionMode || 'bypassPermissions',
-@@ -1886,6 +1959,10 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
-
+@@ -1886,5 +1966,9 @@
+ 
    try {
      const globalConfig = await readJsonFile(GLOBAL_BUILDER_CONFIG_PATH);
 +
-+    // Load project context (CLAUDE.md files + memory) once — flows into all sessions via options spread
++    // Load project context (CLAUDE.md files + memory) once - flows into all sessions via options spread
 +    options.projectContext = await loadProjectContext(projectPath);
 +
      const { packageConfig } = await detectProjectScripts(projectPath);
      const projectConfig = await readJsonFile(path.join(projectPath, '.cloudcli', 'builder.json'));
-     const builderConfig = withDefaultBuilderConfig(mergeBuilderConfig(globalConfig, packageConfig, projectConfig));

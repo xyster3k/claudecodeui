@@ -1,0 +1,207 @@
+diff --git a/src/components/git-panel/view/modals/AuthModeModal.tsx b/src/components/git-panel/view/modals/AuthModeModal.tsx
+--- a/src/components/git-panel/view/modals/AuthModeModal.tsx
++++ b/src/components/git-panel/view/modals/AuthModeModal.tsx
+@@ -1,5 +1,5 @@
+-import { Globe, Key, Lock, X } from 'lucide-react';
++import { Globe, Key, Lock, Search, X } from 'lucide-react';
+ import { useEffect, useMemo, useState } from 'react';
+ import { authenticatedFetch } from '../../../../utils/api';
+ import type { GitAuthMode } from '../../types/types';
+@@ -79,9 +79,18 @@
+   const [keepBackup, setKeepBackup] = useState<boolean>(true);
+
++  // Repo browser state (for non-GitHub hosts with Gitea API)
++  const [giteaRepos, setGiteaRepos] = useState<Array<{full_name: string; description?: string}>>([]);
++  const [showRepoPicker, setShowRepoPicker] = useState(false);
++  const [loadingRepos, setLoadingRepos] = useState(false);
++
+   const originalHost = detectHostFromUrl(remoteUrl);
+   const isProviderSwitch = selectedHost !== originalHost;
+   const isGitHub = selectedHost === 'github.com';
+
++  // Detect if owner/repo was modified from the current remote URL
++  const parsedFromUrl = useMemo(() => parseOwnerRepoFromUrl(remoteUrl), [remoteUrl]);
++  const ownerRepoChanged = owner !== parsedFromUrl.owner || repo !== parsedFromUrl.repo;
++
+   // Load hosts and parse current URL on open
+   useEffect(() => {
+@@ -127,6 +136,22 @@
+     setSelectedHost(newHost);
+     setMode(newHost === 'github.com' ? 'https' : 'ssh');
+     setTokenName('');
++    setShowRepoPicker(false);
++    setGiteaRepos([]);
+   };
+
++  // Fetch repos from Gitea API for the selected host
++  const browseRepos = async () => {
++    if (isGitHub || loadingRepos) return;
++    setLoadingRepos(true);
++    try {
++      const res = await authenticatedFetch(`/api/gitea/repos?host=${encodeURIComponent(selectedHost)}&limit=50`);
++      const body = await res.json() as { repos?: Array<{full_name: string; description?: string}> };
++      setGiteaRepos(body.repos || []);
++      setShowRepoPicker(true);
++    } catch {
++      setGiteaRepos([]);
++    } finally {
++      setLoadingRepos(false);
++    }
++  };
++
+   if (!isOpen) return null;
+@@ -135,11 +160,12 @@
+   const save = async () => {
+     setSaving(true);
++    const needsRepoUpdate = isProviderSwitch || ownerRepoChanged;
+     const ok = await onSave(
+       mode,
+       mode === 'https' ? tokenName || null : null,
+       isProviderSwitch ? selectedHost : undefined,
+-      isProviderSwitch ? owner : undefined,
+-      isProviderSwitch ? repo : undefined,
++      needsRepoUpdate ? owner : undefined,
++      needsRepoUpdate ? repo : undefined,
+       isProviderSwitch ? keepBackup : undefined,
+     );
+     setSaving(false);
+@@ -182,27 +208,61 @@
+         )}
+
+-        {/* Owner / Repo (editable when switching providers) */}
+-        {isProviderSwitch && (
+-          <div className="mb-4">
+-            <label className="mb-1 block text-xs font-medium text-muted-foreground">
+-              Owner / Repository
+-            </label>
+-            <div className="flex items-center gap-1">
+-              <input
+-                type="text"
+-                value={owner}
+-                onChange={(e) => setOwner(e.target.value)}
+-                placeholder="owner"
+-                className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-sm"
+-              />
+-              <span className="text-muted-foreground">/</span>
+-              <input
+-                type="text"
+-                value={repo}
+-                onChange={(e) => setRepo(e.target.value)}
+-                placeholder="repo"
+-                className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-sm"
+-              />
+-            </div>
++        {/* Repository path (always visible and editable) */}
++        <div className="mb-4">
++          <label className="mb-1 block text-xs font-medium text-muted-foreground">
++            Repository path
++          </label>
++          <div className="flex items-center gap-1">
++            <input
++              type="text"
++              value={owner}
++              onChange={(e) => { setOwner(e.target.value); setShowRepoPicker(false); }}
++              placeholder="owner"
++              className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-sm"
++            />
++            <span className="text-muted-foreground">/</span>
++            <input
++              type="text"
++              value={repo}
++              onChange={(e) => { setRepo(e.target.value); setShowRepoPicker(false); }}
++              placeholder="repo"
++              className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-sm"
++            />
++            {!isGitHub && (
++              <button
++                type="button"
++                onClick={browseRepos}
++                disabled={loadingRepos}
++                className="rounded border border-border px-2 py-1.5 text-muted-foreground hover:bg-accent/30 disabled:opacity-50"
++                title="Browse repositories on this host"
++              >
++                <Search className="h-3.5 w-3.5" />
++              </button>
++            )}
+           </div>
+-        )}
++          {showRepoPicker && giteaRepos.length > 0 && (
++            <div className="mt-1 max-h-40 overflow-y-auto rounded border border-border bg-background text-sm">
++              {giteaRepos.map((r) => (
++                <button
++                  key={r.full_name}
++                  type="button"
++                  className="block w-full px-2 py-1.5 text-left hover:bg-accent/30"
++                  onClick={() => {
++                    const parts = r.full_name.split('/');
++                    setOwner(parts[0]);
++                    setRepo(parts.slice(1).join('/'));
++                    setShowRepoPicker(false);
++                  }}
++                >
++                  <span className="font-medium">{r.full_name}</span>
++                  {r.description && (
++                    <span className="ml-2 text-xs text-muted-foreground">{r.description}</span>
++                  )}
++                </button>
++              ))}
++            </div>
++          )}
++          {showRepoPicker && giteaRepos.length === 0 && !loadingRepos && (
++            <p className="mt-1 text-xs text-muted-foreground">
++              No repositories found. Check that the token has repo access.
++            </p>
++          )}
++        </div>
+
+         <p className="mb-4 text-xs text-muted-foreground">
+diff --git a/server/routes/git.js b/server/routes/git.js
+--- a/server/routes/git.js
++++ b/server/routes/git.js
+@@ -1250,14 +1250,18 @@
+       return res.status(400).json({ error: 'Could not parse owner/repo from origin URL' });
+     }
+
+-    // Provider switch: override host and ownerRepo if targetHost is provided
+     let finalHost = host;
+     let finalOwnerRepo = ownerRepo;
++
++    // Owner/repo override (works both with and without provider switch)
++    if (newOwner && newRepo) {
++      finalOwnerRepo = `${newOwner}/${newRepo}`;
++    } else if (newOwner) {
++      const parts = ownerRepo.split('/');
++      finalOwnerRepo = `${newOwner}/${parts[parts.length - 1]}`;
++    }
++
++    // Provider switch: override host if targetHost differs
+     if (targetHost && targetHost !== host) {
+       finalHost = targetHost;
+-      if (newOwner && newRepo) {
+-        finalOwnerRepo = `${newOwner}/${newRepo}`;
+-      } else if (newOwner) {
+-        const parts = ownerRepo.split('/');
+-        finalOwnerRepo = `${newOwner}/${parts[parts.length - 1]}`;
+-      }
+
+       // Save old origin as a backup remote before switching
+@@ -1579,6 +1583,9 @@
+     } else if (errorText.includes('Network is unreachable')) {
+       errorMessage = 'Network error';
+       details = 'Cannot reach remote host. If using SSH, verify the host and port in Settings \u2192 API & Tokens.';
++    } else if (errorText.includes('Cannot find repository')) {
++      errorMessage = 'Repository not found';
++      details = 'The repository path in the remote URL doesn\'t exist on the server. Click the lock/auth-mode button and verify the Repository path fields match the actual repo (e.g. OpenLongevity/repo, not OpenLongevityDev/repo).';
+     } else if (errorText.includes('not found') || errorText.includes('Not found') || errorText.includes('Not Found')) {
+       errorMessage = 'Authentication failed';
+       details = 'Repository not found \u2014 this usually means authentication failed. Check your token and username in Settings \u2192 API & Tokens.';
+@@ -1670,6 +1677,9 @@
+     } else if (errorText.includes('rejected')) {
+       errorMessage = 'Publish rejected';
+       details = 'The remote branch already exists and has different commits. Use push instead.';
++    } else if (errorText.includes('Cannot find repository')) {
++      errorMessage = 'Repository not found';
++      details = 'The repository path in the remote URL doesn\'t exist on the server. Click the lock/auth-mode button and verify the Repository path fields.';
+     } else if (errorText.includes('Could not resolve hostname')) {
+       errorMessage = 'Network error';
+       details = 'Unable to connect to remote repository. Check your internet connection.';

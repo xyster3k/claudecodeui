@@ -1,15 +1,15 @@
 diff --git a/src/components/git-panel/view/modals/AuthModeModal.tsx b/src/components/git-panel/view/modals/AuthModeModal.tsx
 --- a/src/components/git-panel/view/modals/AuthModeModal.tsx
 +++ b/src/components/git-panel/view/modals/AuthModeModal.tsx
-@@ -1,5 +1,5 @@
+@@ -1,4 +1,4 @@
 -import { Globe, Key, Lock, X } from 'lucide-react';
 +import { Globe, Key, Lock, Search, X } from 'lucide-react';
  import { useEffect, useMemo, useState } from 'react';
  import { authenticatedFetch } from '../../../../utils/api';
  import type { GitAuthMode } from '../../types/types';
-@@ -79,9 +79,18 @@
+@@ -79,8 +79,17 @@
    const [keepBackup, setKeepBackup] = useState<boolean>(true);
-
+ 
 +  // Repo browser state (for non-GitHub hosts with Gitea API)
 +  const [giteaRepos, setGiteaRepos] = useState<Array<{full_name: string; description?: string}>>([]);
 +  const [showRepoPicker, setShowRepoPicker] = useState(false);
@@ -18,21 +18,21 @@ diff --git a/src/components/git-panel/view/modals/AuthModeModal.tsx b/src/compon
    const originalHost = detectHostFromUrl(remoteUrl);
    const isProviderSwitch = selectedHost !== originalHost;
    const isGitHub = selectedHost === 'github.com';
-
+ 
 +  // Detect if owner/repo was modified from the current remote URL
 +  const parsedFromUrl = useMemo(() => parseOwnerRepoFromUrl(remoteUrl), [remoteUrl]);
 +  const ownerRepoChanged = owner !== parsedFromUrl.owner || repo !== parsedFromUrl.repo;
 +
    // Load hosts and parse current URL on open
    useEffect(() => {
-@@ -127,6 +136,22 @@
+@@ -127,6 +136,24 @@
      setSelectedHost(newHost);
      setMode(newHost === 'github.com' ? 'https' : 'ssh');
      setTokenName('');
 +    setShowRepoPicker(false);
 +    setGiteaRepos([]);
    };
-
+ 
 +  // Fetch repos from Gitea API for the selected host
 +  const browseRepos = async () => {
 +    if (isGitHub || loadingRepos) return;
@@ -50,7 +50,7 @@ diff --git a/src/components/git-panel/view/modals/AuthModeModal.tsx b/src/compon
 +  };
 +
    if (!isOpen) return null;
-@@ -135,11 +160,12 @@
+@@ -135,10 +160,11 @@
    const save = async () => {
      setSaving(true);
 +    const needsRepoUpdate = isProviderSwitch || ownerRepoChanged;
@@ -64,10 +64,9 @@ diff --git a/src/components/git-panel/view/modals/AuthModeModal.tsx b/src/compon
 +      needsRepoUpdate ? repo : undefined,
        isProviderSwitch ? keepBackup : undefined,
      );
-     setSaving(false);
-@@ -182,27 +208,61 @@
+@@ -182,29 +208,65 @@
          )}
-
+ 
 -        {/* Owner / Repo (editable when switching providers) */}
 -        {isProviderSwitch && (
 -          <div className="mb-4">
@@ -91,6 +90,8 @@ diff --git a/src/components/git-panel/view/modals/AuthModeModal.tsx b/src/compon
 -                className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-sm"
 -              />
 -            </div>
+-          </div>
+-        )}
 +        {/* Repository path (always visible and editable) */}
 +        <div className="mb-4">
 +          <label className="mb-1 block text-xs font-medium text-muted-foreground">
@@ -123,8 +124,7 @@ diff --git a/src/components/git-panel/view/modals/AuthModeModal.tsx b/src/compon
 +                <Search className="h-3.5 w-3.5" />
 +              </button>
 +            )}
-           </div>
--        )}
++          </div>
 +          {showRepoPicker && giteaRepos.length > 0 && (
 +            <div className="mt-1 max-h-40 overflow-y-auto rounded border border-border bg-background text-sm">
 +              {giteaRepos.map((r) => (
@@ -153,15 +153,15 @@ diff --git a/src/components/git-panel/view/modals/AuthModeModal.tsx b/src/compon
 +            </p>
 +          )}
 +        </div>
-
+ 
          <p className="mb-4 text-xs text-muted-foreground">
 diff --git a/server/routes/git.js b/server/routes/git.js
 --- a/server/routes/git.js
 +++ b/server/routes/git.js
-@@ -1250,14 +1250,18 @@
+@@ -1250,16 +1250,19 @@
        return res.status(400).json({ error: 'Could not parse owner/repo from origin URL' });
      }
-
+ 
 -    // Provider switch: override host and ownerRepo if targetHost is provided
      let finalHost = host;
      let finalOwnerRepo = ownerRepo;
@@ -183,7 +183,7 @@ diff --git a/server/routes/git.js b/server/routes/git.js
 -        const parts = ownerRepo.split('/');
 -        finalOwnerRepo = `${newOwner}/${parts[parts.length - 1]}`;
 -      }
-
+ 
        // Save old origin as a backup remote before switching
 @@ -1579,6 +1583,9 @@
      } else if (errorText.includes('Network is unreachable')) {
@@ -191,7 +191,7 @@ diff --git a/server/routes/git.js b/server/routes/git.js
        details = 'Cannot reach remote host. If using SSH, verify the host and port in Settings \u2192 API & Tokens.';
 +    } else if (errorText.includes('Cannot find repository')) {
 +      errorMessage = 'Repository not found';
-+      details = 'The repository path in the remote URL doesn\'t exist on the server. Click the lock/auth-mode button and verify the Repository path fields match the actual repo (e.g. OpenLongevity/repo, not OpenLongevityDev/repo).';
++      details = 'The repository path in the remote URL does not exist on the server. Click the lock/auth-mode button and verify the Repository path fields match the actual repo (e.g. OpenLongevity/repo, not OpenLongevityDev/repo).';
      } else if (errorText.includes('not found') || errorText.includes('Not found') || errorText.includes('Not Found')) {
        errorMessage = 'Authentication failed';
        details = 'Repository not found \u2014 this usually means authentication failed. Check your token and username in Settings \u2192 API & Tokens.';
@@ -201,7 +201,7 @@ diff --git a/server/routes/git.js b/server/routes/git.js
        details = 'The remote branch already exists and has different commits. Use push instead.';
 +    } else if (errorText.includes('Cannot find repository')) {
 +      errorMessage = 'Repository not found';
-+      details = 'The repository path in the remote URL doesn\'t exist on the server. Click the lock/auth-mode button and verify the Repository path fields.';
++      details = 'The repository path in the remote URL does not exist on the server. Click the lock/auth-mode button and verify the Repository path fields.';
      } else if (errorText.includes('Could not resolve hostname')) {
        errorMessage = 'Network error';
        details = 'Unable to connect to remote repository. Check your internet connection.';

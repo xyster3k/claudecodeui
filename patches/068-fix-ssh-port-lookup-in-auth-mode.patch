@@ -1,0 +1,17 @@
+diff --git a/server/routes/git.js b/server/routes/git.js
+--- a/server/routes/git.js
++++ b/server/routes/git.js
+@@ -1270,10 +1270,10 @@
+     if (finalHost !== 'github.com') {
+       try {
+         const { getConnection } = require('../modules/database/connection.js');
+         const db = getConnection();
+         const sshRow = db.prepare(
+-          "SELECT ssh_host, ssh_port FROM user_credentials WHERE git_host = ? AND ssh_host IS NOT NULL LIMIT 1"
+-        ).get(finalHost);
++          "SELECT ssh_host, ssh_port FROM user_credentials WHERE (git_host = ? OR ssh_host = ?) AND ssh_port IS NOT NULL AND ssh_port != '' LIMIT 1"
++        ).get(finalHost, finalHost);
+         if (sshRow) {
+           sshHost = sshRow.ssh_host || finalHost;
+           sshPort = sshRow.ssh_port || '22';
+         }

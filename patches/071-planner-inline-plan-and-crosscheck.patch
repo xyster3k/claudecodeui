@@ -1,0 +1,82 @@
+diff --git a/server/builder-mode.js b/server/builder-mode.js
+index 724a350..ee0c474 100644
+--- a/server/builder-mode.js
++++ b/server/builder-mode.js
+@@ -1826,6 +1826,43 @@ const failPlannerParse = (projectPath) => {
+   );
+ };
+ 
++/**
++ * If `command` looks like a file path (absolute, starts with /, ~, or ./ and ends
++ * with a text-like extension), read the file and return its content prefixed with
++ * provenance metadata.  Otherwise return command unchanged.
++ *
++ * This ensures the planner and coverage reviewer always see the full plan content
++ * inline in the prompt instead of relying on the model to discover and read the file
++ * via tool calls (which some providers do poorly).
++ */
++const resolveCommandContent = async (command, projectPath) => {
++  if (!command || typeof command !== 'string') return command || '';
++  const trimmed = command.trim();
++
++  // Heuristic: looks like a single file path (no newlines, starts with path char,
++  // has a text-like extension).
++  const looksLikePath = /^[~./]/.test(trimmed)
++    && !trimmed.includes('\n')
++    && /\.(md|txt|mdx|rst|org|json|yaml|yml|toml)$/i.test(trimmed);
++
++  if (!looksLikePath) return command;
++
++  // Resolve ~ and relative paths
++  const resolved = trimmed.startsWith('~')
++    ? trimmed.replace(/^~/, process.env.HOME || '/root')
++    : path.isAbsolute(trimmed)
++      ? trimmed
++      : path.resolve(projectPath, trimmed);
++
++  try {
++    const content = await fs.readFile(resolved, 'utf8');
++    return `[Source plan file: ${trimmed}]\n\n${content}`;
++  } catch {
++    // File not readable — pass original command through so the model can try itself
++    return command;
++  }
++};
++
+ const buildPlannerPrompt = ({ command, projectPath, maxWorkers, parallelWorkers, rejectionFeedback, attemptNumber }) => [
+   'You are the senior architect and planner for Builder Mode.',
+   `Project root: ${projectPath}`,
+@@ -1851,6 +1888,13 @@ const buildPlannerPrompt = ({ command, projectPath, maxWorkers, parallelWorkers,
+   '- Mention the main touched areas or file groups when you can infer them.',
+   '- Use task dependencies when one slice clearly depends on another slice finishing first.',
+   '',
++  'Requirement fidelity rules (CRITICAL):',
++  '- Read the ENTIRE user request carefully before planning. Every sentence may contain a distinct requirement.',
++  '- After drafting your tasks, cross-check: list every concrete requirement from the user request and verify each one maps to exactly one task. If a requirement is not covered, add or expand a task.',
++  '- Use the EXACT vocabulary from the user request for status names, route paths, table names, and field names. Do not rename, paraphrase, or "improve" terminology the user specified.',
++  '- If the user request distinguishes between concepts (e.g., "accepted" vs "approved", "/methods/proposals" vs "/method-proposals"), preserve those distinctions precisely in the task descriptions.',
++  '- Do not weaken, defer, or mark as "future work" any requirement the user request explicitly includes. If you believe a requirement should be deferred, flag it as a risk but still assign it to a task.',
++  '',
+   attemptNumber > 1 ? `This is re-planning attempt ${attemptNumber}. The previous plan was rejected by the coverage reviewer.` : '',
+   rejectionFeedback ? `Coverage rejection feedback from the previous attempt:\n${rejectionFeedback}` : '',
+   '',
+@@ -1953,6 +1997,8 @@ const buildPlanCoveragePrompt = ({
+   'Your job:',
+   '- Compare the original user request to the PRD, execution plan, and worker task breakdown.',
+   '- Decide whether the plan is complete enough to begin implementation.',
++  '- For each concrete requirement in the user request, verify it maps to at least one task. List any requirement that has no owning task as a missing requirement.',
++  '- Check that the plan uses the SAME vocabulary as the user request (route paths, status names, table names, field names). Flag any renames or paraphrases as ambiguous points.',
+   '- Flag missing requested outcomes, ambiguous points, and out-of-scope drift.',
+   '- Do not review code. Review only planning coverage.',
+   '',
+@@ -2053,6 +2099,10 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+     // Load project context (CLAUDE.md files + memory) once - flows into all sessions via options spread
+     options.projectContext = await loadProjectContext(projectPath);
+ 
++    // If command is a file path, inline its content so the planner sees it directly
++    // instead of relying on the model to discover and read the file via tool calls.
++    command = await resolveCommandContent(command, projectPath);
++
+     const { packageConfig } = await detectProjectScripts(projectPath);
+     const projectConfig = await readJsonFile(path.join(projectPath, '.cloudcli', 'builder.json'));
+ 

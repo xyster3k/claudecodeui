@@ -19,7 +19,7 @@ index 69bdd8a..cb1ebc1 100644
      if (IS_PLATFORM) {
        setUser({ username: 'platform-user' });
 diff --git a/src/components/sidebar/view/subcomponents/SidebarFooter.tsx b/src/components/sidebar/view/subcomponents/SidebarFooter.tsx
-index b024be3..0f7fdca 100644
+index 77e0653..2d98888 100644
 --- a/src/components/sidebar/view/subcomponents/SidebarFooter.tsx
 +++ b/src/components/sidebar/view/subcomponents/SidebarFooter.tsx
 @@ -1,6 +1,7 @@
@@ -30,8 +30,8 @@ index b024be3..0f7fdca 100644
 +import { useAuth } from '../../../auth/context/AuthContext';
  import type { ReleaseInfo } from '../../../../types/sharedTypes';
  
- const GITHUB_ISSUES_URL = 'https://github.com/siteboon/claudecodeui/issues/new';
-@@ -35,6 +36,8 @@ export default function SidebarFooter({
+ const GITHUB_ISSUES_URL = 'https://github.com/xyster3k/claudecodeui/issues/new';
+@@ -37,6 +38,8 @@ export default function SidebarFooter({
    onShowSettings,
    t,
  }: SidebarFooterProps) {
@@ -40,7 +40,7 @@ index b024be3..0f7fdca 100644
    return (
      <div className="flex-shrink-0" style={{ paddingBottom: 'env(safe-area-inset-bottom, 0)' }}>
        {/* Update banner */}
-@@ -125,6 +128,20 @@ export default function SidebarFooter({
+@@ -127,6 +130,20 @@ export default function SidebarFooter({
          </button>
        </div>
  
@@ -61,11 +61,10 @@ index b024be3..0f7fdca 100644
        {/* Desktop version brand line (OSS mode only) */}
        {!IS_PLATFORM && (
          <div className="hidden px-3 py-2 text-center md:block">
-@@ -181,6 +198,21 @@ export default function SidebarFooter({
-           <span className="text-base font-medium text-foreground">{t('actions.settings')}</span>
+@@ -192,6 +209,21 @@ export default function SidebarFooter({
          </button>
        </div>
-+
+ 
 +      {/* Mobile sign out (OSS only) */}
 +      {!IS_PLATFORM && (
 +        <div className="px-3 pb-3 md:hidden">
@@ -80,14 +79,15 @@ index b024be3..0f7fdca 100644
 +          </button>
 +        </div>
 +      )}
-     </div>
-   );
- }
++
+       {!IS_PLATFORM && (
+         <div className="px-3 pb-3 text-center md:hidden">
+           <a
 diff --git a/src/contexts/WebSocketContext.tsx b/src/contexts/WebSocketContext.tsx
-index 456c076..d2517ef 100644
+index 116da6b..f6e4175 100644
 --- a/src/contexts/WebSocketContext.tsx
 +++ b/src/contexts/WebSocketContext.tsx
-@@ -63,7 +63,9 @@ const useWebSocketProviderState = (): WebSocketContextType => {
+@@ -59,7 +59,9 @@ const useWebSocketProviderState = (): WebSocketContextType => {
        
        const websocket = new WebSocket(wsUrl);
  
@@ -97,7 +97,7 @@ index 456c076..d2517ef 100644
          setIsConnected(true);
          wsRef.current = websocket;
          if (hasConnectedRef.current) {
-@@ -85,7 +87,19 @@ const useWebSocketProviderState = (): WebSocketContextType => {
+@@ -81,7 +83,19 @@ const useWebSocketProviderState = (): WebSocketContextType => {
        websocket.onclose = () => {
          setIsConnected(false);
          wsRef.current = null;
@@ -119,10 +119,10 @@ index 456c076..d2517ef 100644
          reconnectTimeoutRef.current = setTimeout(() => {
            if (unmountedRef.current) return; // Prevent reconnection if unmounted
 diff --git a/src/utils/api.js b/src/utils/api.js
-index 999ee31..1077db7 100644
+index 014aa2b..31e27db 100644
 --- a/src/utils/api.js
 +++ b/src/utils/api.js
-@@ -26,6 +26,10 @@ export const authenticatedFetch = (url, options = {}) => {
+@@ -38,6 +38,10 @@ export const authenticatedFetch = (url, options = {}) => {
      if (refreshedToken) {
        localStorage.setItem('auth-token', refreshedToken);
      }

@@ -1,0 +1,135 @@
+diff --git a/src/components/auth/context/AuthContext.tsx b/src/components/auth/context/AuthContext.tsx
+index 69bdd8a..cb1ebc1 100644
+--- a/src/components/auth/context/AuthContext.tsx
++++ b/src/components/auth/context/AuthContext.tsx
+@@ -115,6 +115,15 @@ export function AuthProvider({ children }: AuthProviderProps) {
+     }
+   }, [checkOnboardingStatus, clearSession, token]);
+ 
++  // Auto-kick: listen for expired-token events fired by authenticatedFetch / WebSocket
++  useEffect(() => {
++    const handleExpired = () => {
++      clearSession();
++    };
++    window.addEventListener('auth-token-expired', handleExpired);
++    return () => window.removeEventListener('auth-token-expired', handleExpired);
++  }, [clearSession]);
++
+   useEffect(() => {
+     if (IS_PLATFORM) {
+       setUser({ username: 'platform-user' });
+diff --git a/src/components/sidebar/view/subcomponents/SidebarFooter.tsx b/src/components/sidebar/view/subcomponents/SidebarFooter.tsx
+index b024be3..0f7fdca 100644
+--- a/src/components/sidebar/view/subcomponents/SidebarFooter.tsx
++++ b/src/components/sidebar/view/subcomponents/SidebarFooter.tsx
+@@ -1,6 +1,7 @@
+-import { Settings, ArrowUpCircle, Bug } from 'lucide-react';
++import { LogOut, Settings, ArrowUpCircle, Bug } from 'lucide-react';
+ import type { TFunction } from 'i18next';
+ import { IS_PLATFORM } from '../../../../constants/config';
++import { useAuth } from '../../../auth/context/AuthContext';
+ import type { ReleaseInfo } from '../../../../types/sharedTypes';
+ 
+ const GITHUB_ISSUES_URL = 'https://github.com/siteboon/claudecodeui/issues/new';
+@@ -35,6 +36,8 @@ export default function SidebarFooter({
+   onShowSettings,
+   t,
+ }: SidebarFooterProps) {
++  const { logout, user } = useAuth();
++
+   return (
+     <div className="flex-shrink-0" style={{ paddingBottom: 'env(safe-area-inset-bottom, 0)' }}>
+       {/* Update banner */}
+@@ -125,6 +128,20 @@ export default function SidebarFooter({
+         </button>
+       </div>
+ 
++      {/* Desktop sign out (OSS only) */}
++      {!IS_PLATFORM && (
++        <div className="hidden px-2 pb-1.5 md:block">
++          <button
++            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-muted-foreground transition-colors hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/15 dark:hover:text-red-400"
++            onClick={logout}
++            title={user?.username ? `Sign out ${user.username}` : 'Sign out'}
++          >
++            <LogOut className="h-3.5 w-3.5" />
++            <span className="text-sm">Sign out</span>
++          </button>
++        </div>
++      )}
++
+       {/* Desktop version brand line (OSS mode only) */}
+       {!IS_PLATFORM && (
+         <div className="hidden px-3 py-2 text-center md:block">
+@@ -181,6 +198,21 @@ export default function SidebarFooter({
+           <span className="text-base font-medium text-foreground">{t('actions.settings')}</span>
+         </button>
+       </div>
++
++      {/* Mobile sign out (OSS only) */}
++      {!IS_PLATFORM && (
++        <div className="px-3 pb-3 md:hidden">
++          <button
++            className="flex h-12 w-full items-center gap-3.5 rounded-xl bg-muted/40 px-4 transition-all hover:bg-red-50/60 active:scale-[0.98] dark:hover:bg-red-900/15"
++            onClick={logout}
++          >
++            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-red-100/60 dark:bg-red-900/20">
++              <LogOut className="h-4.5 w-4.5 text-red-600 dark:text-red-400" />
++            </div>
++            <span className="text-base font-medium text-red-600 dark:text-red-400">Sign out</span>
++          </button>
++        </div>
++      )}
+     </div>
+   );
+ }
+diff --git a/src/contexts/WebSocketContext.tsx b/src/contexts/WebSocketContext.tsx
+index 456c076..d2517ef 100644
+--- a/src/contexts/WebSocketContext.tsx
++++ b/src/contexts/WebSocketContext.tsx
+@@ -63,7 +63,9 @@ const useWebSocketProviderState = (): WebSocketContextType => {
+       
+       const websocket = new WebSocket(wsUrl);
+ 
++      let didOpen = false;
+       websocket.onopen = () => {
++        didOpen = true;
+         setIsConnected(true);
+         wsRef.current = websocket;
+         if (hasConnectedRef.current) {
+@@ -85,7 +87,19 @@ const useWebSocketProviderState = (): WebSocketContextType => {
+       websocket.onclose = () => {
+         setIsConnected(false);
+         wsRef.current = null;
+-        
++
++        // If the connection was rejected before opening after a previous
++        // successful session, the token likely expired — verify and kick to login
++        if (!didOpen && hasConnectedRef.current && token) {
++          fetch('/api/auth/user', {
++            headers: { 'Authorization': `Bearer ${token}` },
++          }).then(res => {
++            if (res.status === 401 || res.status === 403) {
++              window.dispatchEvent(new Event('auth-token-expired'));
++            }
++          }).catch(() => {});
++        }
++
+         // Attempt to reconnect after 3 seconds
+         reconnectTimeoutRef.current = setTimeout(() => {
+           if (unmountedRef.current) return; // Prevent reconnection if unmounted
+diff --git a/src/utils/api.js b/src/utils/api.js
+index 999ee31..1077db7 100644
+--- a/src/utils/api.js
++++ b/src/utils/api.js
+@@ -26,6 +26,10 @@ export const authenticatedFetch = (url, options = {}) => {
+     if (refreshedToken) {
+       localStorage.setItem('auth-token', refreshedToken);
+     }
++    // Auto-kick: clear session when the server rejects an expired/invalid token
++    if ((response.status === 401 || response.status === 403) && !url.includes('/api/auth/')) {
++      window.dispatchEvent(new Event('auth-token-expired'));
++    }
+     return response;
+   });
+ };

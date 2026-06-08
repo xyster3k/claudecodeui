@@ -23,6 +23,14 @@ RUN set -e; for p in /tmp/patches/*.patch; do \
       git apply --index "$p"; \
     done
 
+# Auto-version: replace __BUILD_PATCH__ placeholder with highest patch number
+RUN LATEST_PATCH=$(ls /tmp/patches/*.patch 2>/dev/null | sort -V | tail -1 \
+      | sed 's,.*/,,' | grep -oE '^[0-9]+') \
+ && echo "Build version: p${LATEST_PATCH}" \
+ && find src/ -type f \( -name '*.tsx' -o -name '*.ts' \) \
+      -exec grep -l '__BUILD_PATCH__' {} + 2>/dev/null \
+      | xargs sed -i "s/__BUILD_PATCH__/p${LATEST_PATCH}/g"
+
 RUN npm install \
  && npm run build \
  && npm prune --omit=dev

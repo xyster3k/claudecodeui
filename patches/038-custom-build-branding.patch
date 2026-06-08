@@ -7,7 +7,7 @@ index 027af75..4c61212 100644
 -const GITHUB_REPO_URL = 'https://github.com/siteboon/claudecodeui';
 +const UPSTREAM_GITHUB_REPO_URL = 'https://github.com/siteboon/claudecodeui';
 +const CUSTOM_GITHUB_REPO_URL = 'https://github.com/xyster3k/claudecodeui';
-+const CUSTOM_BUILD_PATCH = 'p038';
++const CUSTOM_BUILD_PATCH = '__BUILD_PATCH__';
  const DISCORD_URL = 'https://discord.gg/buxwujPNRE';
 @@ -31,3 +33,3 @@ export default function AboutTab() {
    const { updateAvailable, latestVersion, currentVersion, releaseInfo } = useVersionCheck('siteboon', 'claudecodeui');
@@ -75,7 +75,7 @@ index a7d5f83..a64de3d 100644
 -const GITHUB_REPO_URL = 'https://github.com/siteboon/claudecodeui';
 +const UPSTREAM_GITHUB_REPO_URL = 'https://github.com/siteboon/claudecodeui';
 +const CUSTOM_GITHUB_REPO_URL = 'https://github.com/xyster3k/claudecodeui';
-+const CUSTOM_BUILD_PATCH = 'p038';
++const CUSTOM_BUILD_PATCH = '__BUILD_PATCH__';
  const DISCORD_URL = 'https://discord.gg/buxwujPNRE';
 @@ -40,3 +42,3 @@ export default function VersionInfoSection({
    const { t } = useTranslation('settings');
@@ -175,7 +175,7 @@ index b024be3..77e0653 100644
 +const GITHUB_ISSUES_URL = 'https://github.com/xyster3k/claudecodeui/issues/new';
 +const UPSTREAM_GITHUB_REPO_URL = 'https://github.com/siteboon/claudecodeui';
 +const CUSTOM_GITHUB_REPO_URL = 'https://github.com/xyster3k/claudecodeui';
-+const CUSTOM_BUILD_PATCH = 'p038';
++const CUSTOM_BUILD_PATCH = '__BUILD_PATCH__';
  
 @@ -131,8 +133,16 @@ export default function SidebarFooter({
            <a
@@ -232,9 +232,9 @@ index ab1eed7..339c063 100644
 +        <h1 className="truncate text-sm font-semibold tracking-tight text-foreground">CloudCLI Custom</h1>
 +        <span
 +          className="rounded-full border border-amber-300/70 bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase leading-none tracking-wide text-amber-800 dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-200"
-+          title="xyster3k custom build, patch p038, not the original upstream CloudCLI release"
++          title="xyster3k custom build, patch __BUILD_PATCH__, not the original upstream CloudCLI release"
 +        >
-+          xyster3k p038
++          xyster3k __BUILD_PATCH__
 +        </span>
 +      </div>
      </div>
@@ -245,5 +245,5 @@ index 58103cf..6caf4dc 100644
 @@ -106,3 +106,3 @@ export default function SidebarProjectList({
    useEffect(() => {
 -    let baseTitle = 'CloudCLI UI';
-+    let baseTitle = 'CloudCLI Custom p038 by xyster3k';
++    let baseTitle = 'CloudCLI Custom __BUILD_PATCH__ by xyster3k';
      const displayName = selectedProject?.displayName?.trim();

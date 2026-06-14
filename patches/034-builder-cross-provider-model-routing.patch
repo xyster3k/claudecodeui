@@ -14,7 +14,7 @@ index 64b08f6..5cbc234 100644
 +  if (!model) return null;
 +  const m = model.toLowerCase();
 +  if (/^(gpt-|o[1-4](-|$)|codex|davinci|text-)/.test(m)) return 'codex';
-+  if (/^(claude-|opus|sonnet|haiku)/.test(m)) return 'claude';
++  if (/^(claude-|opus|sonnet|haiku|fable)/.test(m)) return 'claude';
 +  if (/^(gemini|models\/)/.test(m)) return 'gemini';
 +  return null;
 +};

@@ -153,6 +153,7 @@ Every user-visible patch should be listed here when added. Keep this table curre
 | `036-builder-reconnect-ui.patch` | Builder reconnect UI | Users can reconnect to ongoing builder work. |
 | `037-submit-dedup-guard.patch` | Submit dedup guard | Prevents accidental duplicate message submissions. |
 | `038-custom-build-branding.patch` | Custom build branding | Sidebar, browser title, footer version, Settings/About, issue links, and GitHub star links identify this as `CloudCLI Custom p038 by xyster3k`. |
+| `075-openai-gpt-5.6-models.patch` | OpenAI GPT-5.6 models | Adds GPT-5.6 Sol/Terra/Luna to the OpenAI (Codex) model picker; Codex default is now `gpt-5.6-sol`, and Builder Codex roles default to Sol (planner/integrator/QA) and Terra (worker). |
 
 ## Adding A Feature
 

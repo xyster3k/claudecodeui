@@ -1,3 +1,0 @@
-[credential]
-	helper = /usr/local/bin/cloudcli-git-credential
-	useHttpPath = true

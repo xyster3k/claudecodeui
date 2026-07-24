@@ -1,0 +1,57 @@
+diff --git a/server/builder-mode.js b/server/builder-mode.js
+index a828ef9..fe92cba 100644
+--- a/server/builder-mode.js
++++ b/server/builder-mode.js
+@@ -409,14 +409,14 @@ const createBuilderTaskRuntimeState = (task) => ({
+ 
+ const defaultPlannerModelForProvider = (provider, fallback) => {
+   if (fallback && (!providerForModel(fallback) || providerForModel(fallback) === provider)) return fallback;
+-  if (provider === 'codex') return 'gpt-5.5';
++  if (provider === 'codex') return 'gpt-5.6-sol';
+   if (provider === 'claude') return 'opus';
+   return null;
+ };
+ 
+ const defaultWorkerModelForProvider = (provider, fallback) => {
+   if (fallback && (!providerForModel(fallback) || providerForModel(fallback) === provider)) return fallback;
+-  if (provider === 'codex') return 'gpt-5.4';
++  if (provider === 'codex') return 'gpt-5.6-terra';
+   if (provider === 'claude') return 'sonnet';
+   return null;
+ };
+@@ -914,9 +914,9 @@ const persistRunArtifacts = async (projectPath, sessionId, requestMarkdown, prdM
+     orchestration: {
+       maxParallelWorkers: 2,
+       maxWorkers: 6,
+-      plannerModel: 'gpt-5.5',
+-      workerModel: 'gpt-5.4',
+-      integratorModel: 'gpt-5.5',
++      plannerModel: 'gpt-5.6-sol',
++      workerModel: 'gpt-5.6-terra',
++      integratorModel: 'gpt-5.6-sol',
+     },
+     approvals: {
+       riskyChanges: false,
+diff --git a/shared/modelConstants.js b/shared/modelConstants.js
+index 6c19de8..0daf742 100644
+--- a/shared/modelConstants.js
++++ b/shared/modelConstants.js
+@@ -61,6 +61,9 @@ export const CURSOR_MODELS = {
+  */
+ export const CODEX_MODELS = {
+   OPTIONS: [
++    { value: "gpt-5.6-sol", label: "GPT-5.6 Sol · Flagship, best for coding" },
++    { value: "gpt-5.6-terra", label: "GPT-5.6 Terra · Balanced, ~5.5 quality at half the cost" },
++    { value: "gpt-5.6-luna", label: "GPT-5.6 Luna · Fastest, most affordable" },
+     { value: "gpt-5.5", label: "GPT-5.5" },
+     { value: "gpt-5.4", label: "GPT-5.4" },
+     { value: "gpt-5.4-mini", label: "GPT-5.4 mini" },
+@@ -72,7 +75,7 @@ export const CODEX_MODELS = {
+     { value: "o4-mini", label: "O4-mini" },
+   ],
+ 
+-  DEFAULT: "gpt-5.4",
++  DEFAULT: "gpt-5.6-sol",
+ };
+ 
+ /**

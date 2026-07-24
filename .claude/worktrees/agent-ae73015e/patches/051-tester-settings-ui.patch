@@ -1,0 +1,283 @@
+diff --git a/src/components/settings/hooks/useSettingsController.ts b/src/components/settings/hooks/useSettingsController.ts
+index d8e36f6..7df41b3 100644
+--- a/src/components/settings/hooks/useSettingsController.ts
++++ b/src/components/settings/hooks/useSettingsController.ts
+@@ -17,6 +17,7 @@ import type {
+   NotificationPreferencesState,
+   ProjectSortOrder,
+   SettingsMainTab,
++  TesterSettingsState,
+ } from '../types/types';
+ 
+ type ThemeContextValue = {
+@@ -77,6 +78,15 @@ const createDefaultBuilderSettings = (): BuilderSettingsState => ({
+   },
+ });
+ 
++const createDefaultTesterSettings = (): TesterSettingsState => ({
++  model: '',
++  reasoning: 'high',
++  maxSessions: 10,
++  autoDeploy: false,
++  pollInterval: 300,
++  deployCommand: '',
++});
++
+ const KNOWN_MAIN_TABS: SettingsMainTab[] = ['agents', 'appearance', 'git', 'api', 'tasks', 'notifications', 'plugins', 'builder'];
+ 
+ const normalizeMainTab = (tab: string): SettingsMainTab => {
+@@ -163,6 +173,7 @@ export function useSettingsController({ isOpen, initialTab }: UseSettingsControl
+   const [codexPermissionMode, setCodexPermissionMode] = useState<CodexPermissionMode>('default');
+   const [geminiPermissionMode, setGeminiPermissionMode] = useState<GeminiPermissionMode>('default');
+   const [builderSettings, setBuilderSettings] = useState<BuilderSettingsState>(() => createDefaultBuilderSettings());
++  const [testerSettings, setTesterSettings] = useState<TesterSettingsState>(() => createDefaultTesterSettings());
+ 
+   // Auto-persist builder settings so the build pipeline always picks up the
+   // latest values, even if the user has not clicked Save Settings yet.
+@@ -170,6 +181,10 @@ export function useSettingsController({ isOpen, initialTab }: UseSettingsControl
+     localStorage.setItem('builder-settings', JSON.stringify(builderSettings));
+   }, [builderSettings]);
+ 
++  useEffect(() => {
++    localStorage.setItem('tester-settings', JSON.stringify(testerSettings));
++  }, [testerSettings]);
++
+   const [showLoginModal, setShowLoginModal] = useState(false);
+   const [loginProvider, setLoginProvider] = useState<ActiveLoginProvider>('');
+   const {
+@@ -227,6 +242,14 @@ export function useSettingsController({ isOpen, initialTab }: UseSettingsControl
+         });
+       }
+ 
++      const savedTesterSettings = parseJson<Partial<TesterSettingsState>>(
++        localStorage.getItem('tester-settings'),
++        {},
++      );
++      if (savedTesterSettings && Object.keys(savedTesterSettings).length > 0) {
++        setTesterSettings({ ...createDefaultTesterSettings(), ...savedTesterSettings });
++      }
++
+       try {
+         const notificationResponse = await authenticatedFetch('/api/settings/notification-preferences');
+         if (notificationResponse.ok) {
+@@ -302,6 +325,11 @@ export function useSettingsController({ isOpen, initialTab }: UseSettingsControl
+         lastUpdated: now,
+       }));
+ 
++      localStorage.setItem('tester-settings', JSON.stringify({
++        ...testerSettings,
++        lastUpdated: now,
++      }));
++
+       const notificationResponse = await authenticatedFetch('/api/settings/notification-preferences', {
+         method: 'PUT',
+         body: JSON.stringify(notificationPreferences),
+@@ -317,6 +345,7 @@ export function useSettingsController({ isOpen, initialTab }: UseSettingsControl
+     }
+   }, [
+     builderSettings,
++    testerSettings,
+     claudePermissions.allowedTools,
+     claudePermissions.disallowedTools,
+     claudePermissions.skipPermissions,
+@@ -432,6 +461,8 @@ export function useSettingsController({ isOpen, initialTab }: UseSettingsControl
+     setGeminiPermissionMode,
+     builderSettings,
+     setBuilderSettings,
++    testerSettings,
++    setTesterSettings,
+     openLoginForProvider,
+     showLoginModal,
+     setShowLoginModal,
+diff --git a/src/components/settings/types/types.ts b/src/components/settings/types/types.ts
+index 5d38ca2..4f4befc 100644
+--- a/src/components/settings/types/types.ts
++++ b/src/components/settings/types/types.ts
+@@ -88,4 +88,13 @@ export type BuilderSettingsState = {
+   };
+ };
+ 
++export type TesterSettingsState = {
++  model: string;
++  reasoning: string;
++  maxSessions: number;
++  autoDeploy: boolean;
++  pollInterval: number;
++  deployCommand: string;
++};
++
+ export type SetState<T> = Dispatch<SetStateAction<T>>;
+diff --git a/src/components/settings/view/Settings.tsx b/src/components/settings/view/Settings.tsx
+index cabbfb4..8e7ec68 100644
+--- a/src/components/settings/view/Settings.tsx
++++ b/src/components/settings/view/Settings.tsx
+@@ -39,6 +39,8 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }: Set
+     setGeminiPermissionMode,
+     builderSettings,
+     setBuilderSettings,
++    testerSettings,
++    setTesterSettings,
+     openLoginForProvider,
+     showLoginModal,
+     setShowLoginModal,
+@@ -162,6 +164,8 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }: Set
+                 <BuilderSettingsTab
+                   builderSettings={builderSettings}
+                   onBuilderSettingsChange={setBuilderSettings}
++                  testerSettings={testerSettings}
++                  onTesterSettingsChange={setTesterSettings}
+                 />
+               )}
+ 
+diff --git a/src/components/settings/view/tabs/builder-settings/BuilderSettingsTab.tsx b/src/components/settings/view/tabs/builder-settings/BuilderSettingsTab.tsx
+index 034e211..c83c711 100644
+--- a/src/components/settings/view/tabs/builder-settings/BuilderSettingsTab.tsx
++++ b/src/components/settings/view/tabs/builder-settings/BuilderSettingsTab.tsx
+@@ -3,7 +3,7 @@ import SettingsCard from '../../SettingsCard';
+ import SettingsRow from '../../SettingsRow';
+ import SettingsSection from '../../SettingsSection';
+ import SettingsToggle from '../../SettingsToggle';
+-import type { BuilderSettingsState } from '../../../types/types';
++import type { BuilderSettingsState, TesterSettingsState } from '../../../types/types';
+ import {
+   CLAUDE_MODELS,
+   CURSOR_MODELS,
+@@ -64,14 +64,27 @@ function ModelSelect({ value, onChange }: ModelSelectProps) {
+   );
+ }
+ 
++const POLL_INTERVALS = [
++  { value: 60, label: '1 minute' },
++  { value: 120, label: '2 minutes' },
++  { value: 300, label: '5 minutes' },
++  { value: 600, label: '10 minutes' },
++];
++
++const MAX_SESSIONS = [3, 5, 10, 15, 20];
++
+ type BuilderSettingsTabProps = {
+   builderSettings: BuilderSettingsState;
+   onBuilderSettingsChange: (settings: BuilderSettingsState) => void;
++  testerSettings?: TesterSettingsState;
++  onTesterSettingsChange?: (settings: TesterSettingsState) => void;
+ };
+ 
+ export default function BuilderSettingsTab({
+   builderSettings,
+   onBuilderSettingsChange,
++  testerSettings,
++  onTesterSettingsChange,
+ }: BuilderSettingsTabProps) {
+   const { t } = useTranslation('settings');
+ 
+@@ -283,6 +296,110 @@ export default function BuilderSettingsTab({
+           </SettingsRow>
+         </SettingsCard>
+       </SettingsSection>
++
++      {/* Tester Pipeline */}
++      {testerSettings && onTesterSettingsChange && (
++        <>
++          <SettingsSection
++            title="Tester Pipeline"
++            description="Configure the automated tester pipeline that tests, fixes bugs, and verifies deploys."
++          >
++            <SettingsCard divided>
++              <SettingsRow
++                label="Tester Model"
++                description="AI model used for test sessions. Leave blank for auto-select."
++              >
++                <ModelSelect
++                  value={testerSettings.model}
++                  onChange={(v) => onTesterSettingsChange({ ...testerSettings, model: v })}
++                />
++              </SettingsRow>
++
++              <SettingsRow
++                label="Reasoning Level"
++                description="Reasoning budget for tester sessions."
++              >
++                <select
++                  value={testerSettings.reasoning}
++                  onChange={(e) => onTesterSettingsChange({ ...testerSettings, reasoning: e.target.value })}
++                  className={selectClass}
++                >
++                  {REASONING_LEVELS.map((opt) => (
++                    <option key={opt.value} value={opt.value}>
++                      {opt.label}
++                    </option>
++                  ))}
++                </select>
++              </SettingsRow>
++
++              <SettingsRow
++                label="Max Sessions Per Run"
++                description="Safety limit: orchestrator stops after this many sessions."
++              >
++                <select
++                  value={String(testerSettings.maxSessions)}
++                  onChange={(e) => onTesterSettingsChange({ ...testerSettings, maxSessions: Number(e.target.value) })}
++                  className={selectClass}
++                >
++                  {MAX_SESSIONS.map((n) => (
++                    <option key={n} value={String(n)}>
++                      {n}
++                    </option>
++                  ))}
++                </select>
++              </SettingsRow>
++            </SettingsCard>
++          </SettingsSection>
++
++          <SettingsSection
++            title="Deploy & Orchestration"
++            description="Control how the tester orchestrator handles deploys and session handoffs."
++          >
++            <SettingsCard divided>
++              <SettingsRow
++                label="Auto Deploy"
++                description="Automatically deploy changes when the tester requests it."
++              >
++                <SettingsToggle
++                  checked={testerSettings.autoDeploy}
++                  onChange={(v) => onTesterSettingsChange({ ...testerSettings, autoDeploy: v })}
++                  ariaLabel="Enable auto deploy"
++                />
++              </SettingsRow>
++
++              <SettingsRow
++                label="Poll Interval"
++                description="How often the orchestrator checks pipeline state."
++              >
++                <select
++                  value={String(testerSettings.pollInterval)}
++                  onChange={(e) => onTesterSettingsChange({ ...testerSettings, pollInterval: Number(e.target.value) })}
++                  className={selectClass}
++                >
++                  {POLL_INTERVALS.map((opt) => (
++                    <option key={opt.value} value={String(opt.value)}>
++                      {opt.label}
++                    </option>
++                  ))}
++                </select>
++              </SettingsRow>
++
++              <SettingsRow
++                label="Deploy Command"
++                description="Custom deploy command override. Leave blank to use the default."
++              >
++                <input
++                  type="text"
++                  value={testerSettings.deployCommand}
++                  onChange={(e) => onTesterSettingsChange({ ...testerSettings, deployCommand: e.target.value })}
++                  placeholder="e.g. npm run deploy"
++                  className={selectClass}
++                />
++              </SettingsRow>
++            </SettingsCard>
++          </SettingsSection>
++        </>
++      )}
+     </div>
+   );
+ }

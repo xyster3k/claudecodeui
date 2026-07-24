@@ -1,0 +1,109 @@
+diff --git a/server/claude-sdk.js b/server/claude-sdk.js
+index 0e55fce..09fd7bb 100644
+--- a/server/claude-sdk.js
++++ b/server/claude-sdk.js
+@@ -688,16 +688,12 @@ async function queryClaudeSDK(command, options = {}, ws) {
+       }
+     }
+ 
+-    // Clean up session on completion
+-    if (capturedSessionId) {
+-      removeSession(capturedSessionId);
+-    }
+-
+-    // Clean up temporary image files
+-    await cleanupTempFiles(tempImagePaths, tempDir);
+-
+     // Send completion event
+-    ws.send(createNormalizedMessage({ kind: 'complete', exitCode: 0, isNewSession: !sessionId && !!command, sessionId: capturedSessionId, provider: 'claude' }));
++    try {
++      ws.send(createNormalizedMessage({ kind: 'complete', exitCode: 0, isNewSession: !sessionId && !!command, sessionId: capturedSessionId, provider: 'claude' }));
++    } catch (sendErr) {
++      console.warn('[claude-sdk] Failed to send complete message:', sendErr.message);
++    }
+     notifyRunStopped({
+       userId: ws?.userId || null,
+       provider: 'claude',
+@@ -705,19 +701,10 @@ async function queryClaudeSDK(command, options = {}, ws) {
+       sessionName: sessionSummary,
+       stopReason: 'completed'
+     });
+-    // Complete
+ 
+   } catch (error) {
+     console.error('SDK query error:', error);
+ 
+-    // Clean up session on error
+-    if (capturedSessionId) {
+-      removeSession(capturedSessionId);
+-    }
+-
+-    // Clean up temporary image files on error
+-    await cleanupTempFiles(tempImagePaths, tempDir);
+-
+     // Check if Claude CLI is installed for a clearer error message
+     const installed = await providerAuthService.isProviderInstalled('claude');
+     const errorContent = !installed
+@@ -725,7 +712,11 @@ async function queryClaudeSDK(command, options = {}, ws) {
+       : error.message;
+ 
+     // Send error to WebSocket
+-    ws.send(createNormalizedMessage({ kind: 'error', content: errorContent, sessionId: capturedSessionId || sessionId || null, provider: 'claude' }));
++    try {
++      ws.send(createNormalizedMessage({ kind: 'error', content: errorContent, sessionId: capturedSessionId || sessionId || null, provider: 'claude' }));
++    } catch (sendErr) {
++      console.warn('[claude-sdk] Failed to send error message:', sendErr.message);
++    }
+     notifyRunFailed({
+       userId: ws?.userId || null,
+       provider: 'claude',
+@@ -733,6 +724,12 @@ async function queryClaudeSDK(command, options = {}, ws) {
+       sessionName: sessionSummary,
+       error
+     });
++  } finally {
++    // Always clean up session and temp files, regardless of how we exited
++    if (capturedSessionId) {
++      removeSession(capturedSessionId);
++    }
++    await cleanupTempFiles(tempImagePaths, tempDir).catch(() => {});
+   }
+ }
+ 
+diff --git a/src/components/chat/view/ChatInterface.tsx b/src/components/chat/view/ChatInterface.tsx
+index ee6fb78..e0447a4 100644
+--- a/src/components/chat/view/ChatInterface.tsx
++++ b/src/components/chat/view/ChatInterface.tsx
+@@ -271,6 +271,32 @@ function ChatInterface({
+     };
+   }, [handleAbortSession, isLoading]);
+ 
++  // Staleness timeout: if isLoading stays true for 30s with no new messages, auto-reset.
++  // This catches cases where the backend session ended but the completion message was lost.
++  const lastMessageTimestampRef = useRef<number>(0);
++  useEffect(() => {
++    if (latestMessage) {
++      lastMessageTimestampRef.current = Date.now();
++    }
++  }, [latestMessage]);
++
++  useEffect(() => {
++    if (!isLoading) return;
++
++    const STALE_TIMEOUT = 30_000;
++    const checkInterval = setInterval(() => {
++      const elapsed = Date.now() - lastMessageTimestampRef.current;
++      if (elapsed >= STALE_TIMEOUT) {
++        console.warn('[ChatInterface] Loading state stale for 30s, auto-resetting');
++        setIsLoading(false);
++        setCanAbortSession(false);
++        setClaudeStatus(null);
++      }
++    }, 5_000);
++
++    return () => clearInterval(checkInterval);
++  }, [isLoading, setIsLoading, setCanAbortSession, setClaudeStatus]);
++
+   useEffect(() => {
+     return () => {
+       resetStreamingState();

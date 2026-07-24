@@ -1,0 +1,475 @@
+diff --git a/server/builder-mode.js b/server/builder-mode.js
+index 4b313c8..73e9c71 100644
+--- a/server/builder-mode.js
++++ b/server/builder-mode.js
+@@ -559,6 +559,10 @@ class BufferedWriter {
+     return this.sessionId;
+   }
+ 
++  getSessionHistory() {
++    return [...this.sessionHistory];
++  }
++
+   getSummary() {
+     const text = this.textChunks.join('\n').trim();
+     return {
+@@ -598,11 +602,200 @@ const runItemsWithConcurrency = async (items, limit, worker) => {
+   return results;
+ };
+ 
++const FILE_PATH_KEYS = new Set([
++  'file_path',
++  'filepath',
++  'path',
++  'filename',
++  'new_path',
++  'old_path',
++  'target_file',
++]);
++
++const FILE_EDIT_TOOL_NAMES = new Set([
++  'Edit',
++  'Write',
++  'MultiEdit',
++  'NotebookEdit',
++  'FileChanges',
++]);
++
++const collectPathCandidates = (value, bucket = []) => {
++  if (Array.isArray(value)) {
++    value.forEach((entry) => collectPathCandidates(entry, bucket));
++    return bucket;
++  }
++
++  if (!value || typeof value !== 'object') {
++    return bucket;
++  }
++
++  Object.entries(value).forEach(([key, nestedValue]) => {
++    if (FILE_PATH_KEYS.has(key.toLowerCase()) && typeof nestedValue === 'string') {
++      bucket.push(nestedValue);
++      return;
++    }
++
++    if (nestedValue && typeof nestedValue === 'object') {
++      collectPathCandidates(nestedValue, bucket);
++    }
++  });
++
++  return bucket;
++};
++
++const normalizeProjectRelativePath = (projectPath, candidate) => {
++  const raw = readString(candidate);
++  if (!raw) {
++    return null;
++  }
++
++  const withoutFileScheme = raw.replace(/^file:\/\//i, '');
++  const resolved = path.isAbsolute(withoutFileScheme)
++    ? withoutFileScheme
++    : path.join(projectPath, withoutFileScheme);
++  const relative = path.relative(projectPath, resolved);
++  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
++    if (!path.isAbsolute(withoutFileScheme) && !withoutFileScheme.startsWith('..')) {
++      return withoutFileScheme.split(path.sep).join('/');
++    }
++    return null;
++  }
++
++  return relative.split(path.sep).join('/');
++};
++
++const extractTouchedFilesFromHistory = (sessionHistory, projectPath) => {
++  const touchedFiles = new Set();
++
++  sessionHistory.forEach((message) => {
++    if (message?.kind !== 'tool_use') {
++      return;
++    }
++
++    const toolName = readString(message.toolName);
++    if (!toolName || !FILE_EDIT_TOOL_NAMES.has(toolName)) {
++      return;
++    }
++
++    collectPathCandidates(message.toolInput).forEach((candidate) => {
++      const normalized = normalizeProjectRelativePath(projectPath, candidate);
++      if (normalized) {
++        touchedFiles.add(normalized);
++      }
++    });
++  });
++
++  return [...touchedFiles];
++};
++
++const buildTouchedFileSnapshots = async (projectPath, touchedFiles, maxTotalChars = 5000) => {
++  const snapshots = [];
++  let remaining = maxTotalChars;
++
++  for (const relativePath of touchedFiles.slice(0, 8)) {
++    if (remaining <= 0) {
++      break;
++    }
++
++    try {
++      const absolutePath = path.join(projectPath, relativePath);
++      const raw = await fs.readFile(absolutePath, 'utf8');
++      const excerpt = truncateOutput(raw, Math.min(remaining, 1400));
++      snapshots.push({
++        path: relativePath,
++        excerpt,
++      });
++      remaining -= excerpt.length;
++    } catch {
++      snapshots.push({
++        path: relativePath,
++        excerpt: '[file could not be read after the pass]',
++      });
++      remaining -= 80;
++    }
++  }
++
++  return snapshots;
++};
++
++const persistSlicePassArtifact = async ({
++  projectPath,
++  builderSessionId,
++  task,
++  passNumber,
++  actorType,
++  actorLabel,
++  childSessionId,
++  provider,
++  model,
++  summary,
++  errors,
++  sessionHistory,
++}) => {
++  const touchedFiles = extractTouchedFilesFromHistory(sessionHistory, projectPath);
++  const fileSnapshots = await buildTouchedFileSnapshots(projectPath, touchedFiles);
++  const artifactDir = path.join(
++    projectPath,
++    BUILDER_ARTIFACT_DIR,
++    'passes',
++    sanitizeFileName(builderSessionId),
++  );
++  const artifactPath = path.join(
++    artifactDir,
++    `task-${task.id}-pass-${passNumber}-${sanitizeFileName(actorType)}.json`,
++  );
++
++  await fs.mkdir(artifactDir, { recursive: true });
++
++  const artifact = {
++    builderSessionId,
++    childSessionId,
++    task,
++    passNumber,
++    actorType,
++    actorLabel,
++    provider,
++    model,
++    touchedFiles,
++    fileSnapshots,
++    summary,
++    errors,
++  };
++
++  await fs.writeFile(artifactPath, `${JSON.stringify(artifact, null, 2)}\n`, 'utf8');
++
++  const contextForNextPass = [
++    `Previous pass artifact: ${artifactPath}`,
++    touchedFiles.length > 0 ? `Touched files from previous pass: ${touchedFiles.join(', ')}` : 'Touched files from previous pass: not detected from tool history.',
++    fileSnapshots.length > 0
++      ? [
++        'Current code excerpts from the previous pass:',
++        ...fileSnapshots.map((entry) => [
++          `File: ${entry.path}`,
++          '```',
++          entry.excerpt,
++          '```',
++        ].join('\n')),
++      ].join('\n')
++      : '',
++  ].filter(Boolean).join('\n\n');
++
++  return {
++    artifactPath,
++    touchedFiles,
++    fileSnapshots,
++    contextForNextPass,
++  };
++};
++
+ const formatWorkerResults = (results) => results.map((result) => [
+   `### Worker ${result.task.id}: ${result.task.title}`,
+   `Status: ${result.ok ? 'completed' : 'failed'}`,
+   result.acceptedByPlanner ? 'Planner verdict: accepted' : '',
+   result.reviewTrail?.length ? `Planner review trail: ${result.reviewTrail.map((entry) => `${entry.executor}:${entry.decision}`).join(' -> ')}` : '',
++  result.touchedFiles?.length ? `Touched files: ${result.touchedFiles.join(', ')}` : '',
++  result.artifactPath ? `Latest slice artifact: ${result.artifactPath}` : '',
+   result.summary ? result.summary : 'No worker summary captured.',
+   result.errors.length > 0 ? `Errors: ${result.errors.join(' | ')}` : '',
+ ].filter(Boolean).join('\n')).join('\n\n');
+@@ -663,6 +856,7 @@ const buildSliceExecutionPrompt = ({
+   task,
+   plannerFeedback,
+   previousSummary,
++  previousAttemptContext,
+ }) => [
+   `You are ${actorLabel} in a coordinated builder run.`,
+   `Role: ${actorRole}`,
+@@ -679,6 +873,7 @@ const buildSliceExecutionPrompt = ({
+   '',
+   plannerFeedback ? `Planner feedback for this pass:\n${plannerFeedback}` : '',
+   previousSummary ? `Latest prior implementation summary:\n${truncateOutput(previousSummary, 1200)}` : '',
++  previousAttemptContext ? `Previous pass code context:\n${truncateOutput(previousAttemptContext, 7000)}` : '',
+   '',
+   'Rules:',
+   '- You know the whole project context, but you own this slice.',
+@@ -703,6 +898,8 @@ const buildPlannerCheckpointPrompt = ({
+   executorModel,
+   executorSummary,
+   executorErrors,
++  executorTouchedFiles,
++  executorArtifactPath,
+   acceptedTasks,
+   reviewerAvailable,
+   reviewerLabel,
+@@ -733,10 +930,12 @@ const buildPlannerCheckpointPrompt = ({
+   'Executor summary:',
+   executorSummary ? truncateOutput(executorSummary, 2400) : 'No executor summary captured.',
+   executorErrors.length > 0 ? `Executor errors: ${executorErrors.join(' | ')}` : '',
++  executorTouchedFiles?.length ? `Touched files detected: ${executorTouchedFiles.join(', ')}` : '',
++  executorArtifactPath ? `Executor artifact: ${executorArtifactPath}` : '',
+   '',
+   'Decision rules:',
+   '- Choose "accept" only if this slice materially satisfies the assigned task and can move forward.',
+-  '- Choose "rework" if the task needs another implementation pass with clearer direction.',
++  '- Choose "rework" if the task needs another implementation pass with clearer direction from a fresh worker session.',
+   '- Choose "reviewer" if an independent higher-tier reviewer should inspect and fix this slice before it can be accepted.',
+   '- Keep feedback concrete and scoped to this slice.',
+   '- If you update the task, keep the ownership boundary clear.',
+@@ -1224,24 +1423,23 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+ 
+     const runSlicePass = async ({
+       task,
++      passNumber,
+       actorType,
+       plannerFeedback,
+       previousSummary,
+-      workerSessionId,
+-      reviewerSessionId,
++      previousAttemptContext,
+     }) => {
+       const isReviewer = actorType === 'reviewer';
+       const actorProvider = isReviewer ? reviewerProviderName : provider;
+       const actorModel = isReviewer ? reviewerModel : (workerModel || options.model);
+       const actorReasoning = isReviewer ? reviewerReasoning : workerReasoning;
+-      const actorLabel = isReviewer ? `Slice Reviewer ${task.id}` : `Worker ${task.id}`;
++      const actorLabel = isReviewer ? `Slice Reviewer ${task.id} Pass ${passNumber}` : `Worker ${task.id} Pass ${passNumber}`;
+       const actorRole = isReviewer ? 'slice reviewer' : 'worker';
+-      const initialSessionId = isReviewer ? reviewerSessionId : workerSessionId;
+ 
+       sendTaskUpdate(writer, sessionId, provider, `${actorLabel} started: ${task.title}`, 'in_progress');
+ 
+       const actorWriter = new BufferedWriter(
+-        initialSessionId || `${sessionId}-${actorType}-${task.id}`,
++        `${sessionId}-${actorType}-${task.id}-pass-${passNumber}`,
+         actorProvider,
+         (childSessionId, childProvider) => {
+           registerChildSession(childSessionId, childProvider, isReviewer ? 'reviewer' : 'worker');
+@@ -1260,46 +1458,92 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+             task,
+             plannerFeedback,
+             previousSummary,
++            previousAttemptContext,
+           }), actorReasoning),
+           options: {
+             ...options,
+             cwd: projectPath,
+             projectPath,
+             model: actorModel,
+-            sessionId: initialSessionId,
+-            resume: Boolean(initialSessionId),
+           },
+           writer: actorWriter,
+         });
+ 
+         const result = actorWriter.getSummary();
++        const passArtifact = await persistSlicePassArtifact({
++          projectPath,
++          builderSessionId: sessionId,
++          task,
++          passNumber,
++          actorType,
++          actorLabel,
++          childSessionId: result.sessionId || `${sessionId}-${actorType}-${task.id}-pass-${passNumber}`,
++          provider: actorProvider,
++          model: actorModel,
++          summary: result.text,
++          errors: result.errors,
++          sessionHistory: actorWriter.getSessionHistory(),
++        });
+         sendTaskUpdate(writer, sessionId, provider, `${actorLabel} completed: ${task.title}`, 'completed');
+-        if (result.text) {
+-          sendAssistantText(writer, sessionId, provider, `### ${actorLabel} summary\n${result.text}`);
+-        }
++        sendAssistantText(writer, sessionId, provider, [
++          `### ${actorLabel} summary`,
++          result.text || 'No summary captured.',
++          passArtifact.touchedFiles.length > 0 ? `Touched files: ${passArtifact.touchedFiles.join(', ')}` : '',
++          `Pass artifact: ${passArtifact.artifactPath}`,
++        ].filter(Boolean).join('\n'));
+ 
+         return {
+           ok: true,
+           task,
+           summary: result.text,
+           errors: result.errors,
+-          childSessionId: result.sessionId || initialSessionId || `${sessionId}-${actorType}-${task.id}`,
++          childSessionId: result.sessionId || `${sessionId}-${actorType}-${task.id}-pass-${passNumber}`,
+           provider: actorProvider,
+           model: actorModel,
+           actorType,
++          touchedFiles: passArtifact.touchedFiles,
++          artifactPath: passArtifact.artifactPath,
++          contextForNextPass: passArtifact.contextForNextPass,
+         };
+       } catch (error) {
+         const message = error instanceof Error ? error.message : String(error);
++        const partialResult = actorWriter.getSummary();
++        let partialArtifact = {
++          artifactPath: '',
++          touchedFiles: [],
++          contextForNextPass: '',
++        };
++
++        if (partialResult.text || partialResult.errors.length > 0 || actorWriter.getSessionHistory().length > 0) {
++          partialArtifact = await persistSlicePassArtifact({
++            projectPath,
++            builderSessionId: sessionId,
++            task,
++            passNumber,
++            actorType,
++            actorLabel,
++            childSessionId: partialResult.sessionId || `${sessionId}-${actorType}-${task.id}-pass-${passNumber}`,
++            provider: actorProvider,
++            model: actorModel,
++            summary: partialResult.text,
++            errors: [...partialResult.errors, message],
++            sessionHistory: actorWriter.getSessionHistory(),
++          });
++        }
++
+         sendAssistantText(writer, sessionId, provider, `### ${actorLabel} failed\n${message}`);
+         return {
+           ok: false,
+           task,
+-          summary: '',
+-          errors: [message],
+-          childSessionId: initialSessionId || `${sessionId}-${actorType}-${task.id}`,
++          summary: partialResult.text || '',
++          errors: [...partialResult.errors, message],
++          childSessionId: partialResult.sessionId || `${sessionId}-${actorType}-${task.id}-pass-${passNumber}`,
+           provider: actorProvider,
+           model: actorModel,
+           actorType,
++          touchedFiles: partialArtifact.touchedFiles,
++          artifactPath: partialArtifact.artifactPath,
++          contextForNextPass: partialArtifact.contextForNextPass,
+         };
+       }
+     };
+@@ -1319,9 +1563,9 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       }
+ 
+       let currentTask = task;
+-      let workerSessionId = null;
+-      let reviewerSessionId = null;
++      let lastChildSessionId = null;
+       let previousSummary = '';
++      let previousAttemptContext = '';
+       let plannerFeedback = '';
+       let nextActorType = 'worker';
+       let reviewerPassesUsed = 0;
+@@ -1334,26 +1578,23 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+             task: currentTask,
+             summary: previousSummary,
+             errors: ['Builder workflow aborted.'],
+-            childSessionId: workerSessionId || `${sessionId}-worker-${index + 1}`,
++            childSessionId: lastChildSessionId || `${sessionId}-worker-${index + 1}`,
+             reviewTrail,
+           };
+         }
+ 
+         const passResult = await runSlicePass({
+           task: currentTask,
++          passNumber,
+           actorType: nextActorType,
+           plannerFeedback,
+           previousSummary,
+-          workerSessionId,
+-          reviewerSessionId,
++          previousAttemptContext,
+         });
+ 
+-        if (nextActorType === 'worker') {
+-          workerSessionId = passResult.childSessionId || workerSessionId;
+-        } else {
+-          reviewerSessionId = passResult.childSessionId || reviewerSessionId;
+-        }
++        lastChildSessionId = passResult.childSessionId || lastChildSessionId;
+         previousSummary = passResult.summary || previousSummary;
++        previousAttemptContext = passResult.contextForNextPass || previousAttemptContext;
+ 
+         if (!plannerCheckpointReview) {
+           return {
+@@ -1373,6 +1614,8 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+           executorModel: passResult.model,
+           executorSummary: passResult.summary,
+           executorErrors: passResult.errors,
++          executorTouchedFiles: passResult.touchedFiles,
++          executorArtifactPath: passResult.artifactPath,
+           reviewerAvailable,
+           reviewerLabel: reviewerAvailable ? `${reviewerProviderName}/${reviewerModel || 'default'}` : '',
+         });
+@@ -1397,7 +1640,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+             task: currentTask,
+             summary: previousSummary,
+             errors: ['Builder workflow aborted.'],
+-            childSessionId: passResult.childSessionId || `${sessionId}-worker-${index + 1}`,
++            childSessionId: passResult.childSessionId || lastChildSessionId || `${sessionId}-worker-${index + 1}`,
+             reviewTrail,
+           };
+         }
+@@ -1414,6 +1657,8 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+             ].filter(Boolean).join('\n\n'),
+             acceptedByPlanner: true,
+             reviewTrail,
++            touchedFiles: passResult.touchedFiles,
++            artifactPath: passResult.artifactPath,
+           };
+         }
+ 
+@@ -1427,7 +1672,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+ 
+         plannerFeedback = [plannerDecision.reason, plannerDecision.feedback].filter(Boolean).join('\n\n');
+         nextActorType = 'worker';
+-        sendTaskUpdate(writer, sessionId, provider, `Planner requested rework for Task ${currentTask.id}: ${currentTask.title}`, 'in_progress');
++        sendTaskUpdate(writer, sessionId, provider, `Planner requested a fresh worker pass for Task ${currentTask.id}: ${currentTask.title}`, 'in_progress');
+       }
+ 
+       const failureMessage = `Planner did not accept Task ${currentTask.id} within ${maxTaskPasses} pass(es).`;
+@@ -1437,7 +1682,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+         task: currentTask,
+         summary: previousSummary,
+         errors: [failureMessage],
+-        childSessionId: reviewerSessionId || workerSessionId || `${sessionId}-worker-${index + 1}`,
++        childSessionId: lastChildSessionId || `${sessionId}-worker-${index + 1}`,
+         acceptedByPlanner: false,
+         reviewTrail,
+       };

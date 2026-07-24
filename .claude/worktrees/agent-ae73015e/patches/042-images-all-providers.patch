@@ -1,0 +1,28 @@
+diff --git a/src/components/chat/hooks/useChatComposerState.ts b/src/components/chat/hooks/useChatComposerState.ts
+index af37586..c9752d8 100644
+--- a/src/components/chat/hooks/useChatComposerState.ts
++++ b/src/components/chat/hooks/useChatComposerState.ts
+@@ -649,6 +649,7 @@ export function useChatComposerState({
+             sessionSummary,
+             toolsSettings,
+             workflowMode,
++            images: uploadedImages,
+             builderSettings,
+           },
+         });
+@@ -666,6 +667,7 @@ export function useChatComposerState({
+             sessionSummary,
+             permissionMode: permissionMode === 'plan' ? 'default' : permissionMode,
+             workflowMode,
++            images: uploadedImages,
+             builderSettings,
+           },
+         });
+@@ -685,6 +687,7 @@ export function useChatComposerState({
+             toolsSettings,
+             workflowMode,
+             builderSettings,
++            images: uploadedImages,
+           },
+         });
+       } else {

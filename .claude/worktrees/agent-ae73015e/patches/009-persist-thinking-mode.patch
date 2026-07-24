@@ -1,0 +1,32 @@
+diff --git a/src/components/chat/hooks/useChatComposerState.ts b/src/components/chat/hooks/useChatComposerState.ts
+index fb7c3fc..08bfb1a 100644
+--- a/src/components/chat/hooks/useChatComposerState.ts
++++ b/src/components/chat/hooks/useChatComposerState.ts
+@@ -145,7 +145,18 @@ export function useChatComposerState({
+   const [uploadingImages, setUploadingImages] = useState<Map<string, number>>(new Map());
+   const [imageErrors, setImageErrors] = useState<Map<string, string>>(new Map());
+   const [isTextareaExpanded, setIsTextareaExpanded] = useState(false);
+-  const [thinkingMode, setThinkingMode] = useState('none');
++  const [thinkingMode, _setThinkingMode] = useState(() => {
++    if (typeof window !== 'undefined') {
++      return localStorage.getItem('cloudcli_thinking_mode') || 'none';
++    }
++    return 'none';
++  });
++  const setThinkingMode = useCallback((mode: string) => {
++    _setThinkingMode(mode);
++    if (typeof window !== 'undefined') {
++      localStorage.setItem('cloudcli_thinking_mode', mode);
++    }
++  }, []);
+ 
+   const textareaRef = useRef<HTMLTextAreaElement>(null);
+   const inputHighlightRef = useRef<HTMLDivElement>(null);
+@@ -667,7 +678,6 @@ export function useChatComposerState({
+       setUploadingImages(new Map());
+       setImageErrors(new Map());
+       setIsTextareaExpanded(false);
+-      setThinkingMode('none');
+ 
+       if (textareaRef.current) {
+         textareaRef.current.style.height = 'auto';

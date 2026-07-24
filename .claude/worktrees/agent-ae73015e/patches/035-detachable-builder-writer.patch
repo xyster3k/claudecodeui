@@ -1,0 +1,522 @@
+diff --git a/server/builder-detachable-writer.js b/server/builder-detachable-writer.js
+new file mode 100644
+index 0000000..85efd9e
+--- /dev/null
++++ b/server/builder-detachable-writer.js
+@@ -0,0 +1,193 @@
++/**
++ * DetachableWriter — a proxy between the builder pipeline and the WebSocket.
++ *
++ * Purpose: lets builder runs survive browser disconnects. Messages are always
++ * logged to an in-memory ring buffer; when a WebSocket writer is attached,
++ * messages are also forwarded in real time. When the browser disconnects the
++ * writer is set to null — the pipeline keeps running, and the buffer keeps
++ * accumulating. On reconnect, attach() replays missed messages and re-sends
++ * pending approval requests.
++ */
++
++const MESSAGE_LOG_CAP = 2000;
++
++export class DetachableWriter {
++  constructor(sessionId, provider) {
++    this.sessionId = sessionId;
++    this.provider = provider;
++    /** Duck-type compat — code checks `writer.isWebSocketWriter` */
++    this.isWebSocketWriter = true;
++    /** Ring buffer of all messages sent by the pipeline */
++    this.messageLog = [];
++    /** The live WebSocket writer — null when browser is disconnected */
++    this.wsWriter = null;
++    /** requestId → { resolve, message } for approvals awaiting user response */
++    this.pendingApprovals = new Map();
++    /** Track the current run phase for status queries */
++    this.currentPhase = 'initializing';
++    /** The original command */
++    this.command = '';
++  }
++
++  /**
++   * Attach a new WebSocket writer and replay missed messages.
++   * @param {object} wsWriter - WebSocketWriter instance
++   * @param {number} fromIndex - replay messages starting from this index
++   */
++  attach(wsWriter, fromIndex = 0) {
++    this.wsWriter = wsWriter;
++    const startIndex = Math.max(0, Math.min(fromIndex, this.messageLog.length));
++    for (let i = startIndex; i < this.messageLog.length; i++) {
++      try {
++        this.wsWriter.send(this.messageLog[i]);
++      } catch {
++        // If send fails during replay, detach
++        this.wsWriter = null;
++        return;
++      }
++    }
++    // Re-send pending approval requests so the reconnected user sees them
++    for (const [, entry] of this.pendingApprovals) {
++      try {
++        this.wsWriter.send(entry.message);
++      } catch {
++        this.wsWriter = null;
++        return;
++      }
++    }
++  }
++
++  /**
++   * Detach the WebSocket writer (browser disconnected).
++   */
++  detach() {
++    this.wsWriter = null;
++  }
++
++  /**
++   * Send a message. Always logs; forwards to WS only if attached.
++   */
++  send(message) {
++    this.messageLog.push(message);
++    if (this.messageLog.length > MESSAGE_LOG_CAP) {
++      this.messageLog.shift();
++    }
++    if (this.wsWriter) {
++      try {
++        this.wsWriter.send(message);
++      } catch {
++        // Send failed — detach silently, pipeline continues
++        this.wsWriter = null;
++      }
++    }
++  }
++
++  /**
++   * Register a pending approval (called from waitForBuilderApproval).
++   * @param {string} requestId
++   * @param {Function} resolve - Promise resolve callback
++   * @param {object} message - the permission_request message to replay on reconnect
++   */
++  registerApproval(requestId, resolve, message) {
++    this.pendingApprovals.set(requestId, { resolve, message });
++  }
++
++  /**
++   * Resolve a pending approval (user responded).
++   * @param {string} requestId
++   * @param {object} decision - { allow: boolean, message?: string }
++   * @returns {boolean} true if the approval was found and resolved
++   */
++  resolveApproval(requestId, decision) {
++    const pending = this.pendingApprovals.get(requestId);
++    if (!pending) {
++      return false;
++    }
++    this.pendingApprovals.delete(requestId);
++    pending.resolve(decision);
++    return true;
++  }
++
++  /**
++   * Check if this writer has pending approvals.
++   */
++  hasPendingApprovals() {
++    return this.pendingApprovals.size > 0;
++  }
++
++  /**
++   * Get the number of logged messages (for replay index).
++   */
++  getMessageCount() {
++    return this.messageLog.length;
++  }
++
++  /**
++   * Check if a WebSocket writer is currently attached.
++   */
++  isAttached() {
++    return this.wsWriter !== null;
++  }
++}
++
++/**
++ * Registry of active DetachableWriters, keyed by builder sessionId.
++ * Used by the WS close handler and reattach handler.
++ */
++const activeDetachableWriters = new Map();
++
++/**
++ * Create and register a DetachableWriter for a builder run.
++ */
++export function createDetachableWriter(sessionId, provider, wsWriter) {
++  const dw = new DetachableWriter(sessionId, provider);
++  dw.attach(wsWriter);
++  activeDetachableWriters.set(sessionId, dw);
++  return dw;
++}
++
++/**
++ * Remove a DetachableWriter from the registry (run finished).
++ */
++export function removeDetachableWriter(sessionId) {
++  activeDetachableWriters.delete(sessionId);
++}
++
++/**
++ * Get a DetachableWriter by session ID.
++ */
++export function getDetachableWriter(sessionId) {
++  return activeDetachableWriters.get(sessionId) || null;
++}
++
++/**
++ * Detach all DetachableWriters that reference the given wsWriter.
++ * Called when a WebSocket connection closes.
++ */
++export function detachWritersByWs(wsWriter) {
++  for (const [, dw] of activeDetachableWriters) {
++    if (dw.wsWriter === wsWriter) {
++      dw.detach();
++    }
++  }
++}
++
++/**
++ * Attempt to resolve a builder approval across all active DetachableWriters.
++ * Returns true if the approval was found and resolved.
++ */
++export function resolveBuilderApprovalFromWriters(requestId, decision) {
++  for (const [, dw] of activeDetachableWriters) {
++    if (dw.resolveApproval(requestId, decision)) {
++      return true;
++    }
++  }
++  return false;
++}
++
++/**
++ * List all active DetachableWriters (for REST API).
++ */
++export function getActiveDetachableWriters() {
++  return activeDetachableWriters;
++}
+diff --git a/server/builder-mode.js b/server/builder-mode.js
+index 5cbc234..08be097 100644
+--- a/server/builder-mode.js
++++ b/server/builder-mode.js
+@@ -9,6 +9,7 @@ import { sessionsDb } from './modules/database/index.js';
+ import { abortCodexSession, queryCodex } from './openai-codex.js';
+ import { abortGeminiSession, spawnGemini } from './gemini-cli.js';
+ import { providerAuthService } from './modules/providers/services/provider-auth.service.js';
++import { removeDetachableWriter } from './builder-detachable-writer.js';
+ 
+ const TASKMASTER_DIR = '.taskmaster';
+ const BUILDER_ARTIFACT_DIR = '.cloudcli/builder-runs';
+@@ -356,23 +357,39 @@ const resolveQaProvider = async ({
+ };
+ 
+ export function resolveBuilderApproval(requestId, decision = {}) {
++  const normalizedDecision = {
++    allow: Boolean(decision.allow),
++    message: typeof decision.message === 'string' ? decision.message.trim() : '',
++  };
++
++  // Check the global map first (legacy path)
+   const pending = builderApprovalRequests.get(requestId);
+-  if (!pending) {
+-    return false;
++  if (pending) {
++    builderApprovalRequests.delete(requestId);
++    pending.resolve(normalizedDecision);
++    return true;
+   }
+ 
+-  builderApprovalRequests.delete(requestId);
+-  pending.resolve({
+-    allow: Boolean(decision.allow),
+-    message: typeof decision.message === 'string' ? decision.message.trim() : '',
+-  });
+-  return true;
++  // Check all active DetachableWriters
++  for (const [, runState] of activeBuilderRuns) {
++    if (runState.detachableWriter && typeof runState.detachableWriter.resolveApproval === 'function') {
++      if (runState.detachableWriter.resolveApproval(requestId, normalizedDecision)) {
++        return true;
++      }
++    }
++  }
++
++  return false;
+ }
+ 
+ export function isBuilderWorkflowActive(sessionId) {
+   return activeBuilderRuns.has(sessionId);
+ }
+ 
++export function getActiveBuilderRuns() {
++  return activeBuilderRuns;
++}
++
+ export function resolveBuilderAbortTarget(sessionId) {
+   if (activeBuilderRuns.has(sessionId)) {
+     return sessionId;
+@@ -414,8 +431,7 @@ export async function abortBuilderWorkflow(sessionId) {
+ 
+ const waitForBuilderApproval = ({ writer, sessionId, provider, summary, input, context }) => new Promise((resolve) => {
+   const requestId = `builder_approval_${randomUUID()}`;
+-  builderApprovalRequests.set(requestId, { resolve });
+-  sendNormalized(writer, {
++  const message = createNormalizedMessage({
+     kind: 'permission_request',
+     sessionId,
+     provider,
+@@ -428,6 +444,13 @@ const waitForBuilderApproval = ({ writer, sessionId, provider, summary, input, c
+       ...(context || {}),
+     },
+   });
++  // Register approval on DetachableWriter if available (for replay on reconnect)
++  if (typeof writer.registerApproval === 'function') {
++    writer.registerApproval(requestId, resolve, message);
++  } else {
++    builderApprovalRequests.set(requestId, { resolve });
++  }
++  writer.send(message);
+ });
+ 
+ const maybeApproveStage = async ({
+@@ -1856,7 +1879,13 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+     persistenceQueue: createSerializedRunner(),
+     record: null,
+     paths: null,
++    detachableWriter: null,
+   };
++  // Store DetachableWriter reference if the writer is one
++  if (typeof writer.registerApproval === 'function') {
++    runState.detachableWriter = writer;
++    writer.command = command;
++  }
+   activeBuilderRuns.set(sessionId, runState);
+ 
+   sendNormalized(writer, {
+@@ -3203,6 +3232,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+         plannerControlSessions.delete(childSessionId);
+       }
+     }
++    removeDetachableWriter(sessionId);
+     activeBuilderRuns.delete(sessionId);
+   }
+ }
+diff --git a/server/index.js b/server/index.js
+index fcc0845..4a2419d 100755
+--- a/server/index.js
++++ b/server/index.js
+@@ -46,6 +46,8 @@ import {
+     getActiveGeminiSessions,
+ } from './gemini-cli.js';
+ import { abortBuilderWorkflow, resolveBuilderAbortTarget, resolveBuilderApproval, runBuilderWorkflow } from './builder-mode.js';
++import { createDetachableWriter, detachWritersByWs, getDetachableWriter } from './builder-detachable-writer.js';
++import builderRoutes from './routes/builder.js';
+ import sessionManager from './sessionManager.js';
+ import {
+     stripAnsiSequences,
+@@ -114,6 +116,9 @@ const wss = createWebSocketServer(server, {
+         resolveBuilderApproval,
+     resolveBuilderAbortTarget,
+         abortBuilderWorkflow,
++        createDetachableWriter,
++        detachWritersByWs,
++        getDetachableWriter,
+     },
+     shell: {
+         getSessionById: (sessionId) => sessionManager.getSession(sessionId),
+@@ -190,6 +195,9 @@ app.use('/api/plugins', authenticateToken, pluginsRoutes);
+ // Unified provider MCP routes (protected)
+ app.use('/api/providers', authenticateToken, providerRoutes);
+ 
++// Builder API Routes (protected)
++app.use('/api/builder', authenticateToken, builderRoutes);
++
+ // Agent API Routes (uses API key authentication)
+ app.use('/api/agent', agentRoutes);
+ 
+diff --git a/server/modules/websocket/services/chat-websocket.service.ts b/server/modules/websocket/services/chat-websocket.service.ts
+index 59e3d0a..850ea74 100644
+--- a/server/modules/websocket/services/chat-websocket.service.ts
++++ b/server/modules/websocket/services/chat-websocket.service.ts
+@@ -20,6 +20,7 @@ type ChatIncomingMessage = AnyRecord & {
+   updatedInput?: unknown;
+   message?: unknown;
+   rememberEntry?: unknown;
++  fromIndex?: number;
+ };
+ 
+ const DEFAULT_PROVIDER: LLMProvider = 'claude';
+@@ -52,10 +53,13 @@ type ChatWebSocketDependencies = {
+   getActiveCursorSessions: () => unknown;
+   getActiveCodexSessions: () => unknown;
+   getActiveGeminiSessions: () => unknown;
+-  runBuilderWorkflow: (command: string, options: unknown, writer: WebSocketWriter, provider: string) => Promise<unknown>;
++  runBuilderWorkflow: (command: string, options: unknown, writer: unknown, provider: string) => Promise<unknown>;
+   resolveBuilderApproval: (requestId: string, decision: { allow: boolean; message?: string }) => boolean;
+   abortBuilderWorkflow: (sessionId: string) => Promise<unknown>;
+   resolveBuilderAbortTarget: (sessionId: string) => { parentSessionId: string; provider: string } | null;
++  createDetachableWriter: (sessionId: string, provider: string, wsWriter: WebSocketWriter) => unknown;
++  detachWritersByWs: (wsWriter: WebSocketWriter) => void;
++  getDetachableWriter: (sessionId: string) => { attach: (w: WebSocketWriter, f?: number) => void; getMessageCount: () => number } | null;
+ };
+ 
+ /**
+@@ -128,7 +132,21 @@ export function handleChatConnection(
+           : messageType === 'codex-command' ? 'codex'
+           : messageType === 'gemini-command' ? 'gemini'
+           : 'claude';
+-        await dependencies.runBuilderWorkflow(data.command ?? '', data.options ?? {}, writer, provider);
++
++        // Fire-and-forget: wrap writer in DetachableWriter so the run
++        // survives browser disconnects. The session_created message will
++        // be sent by the builder before any real work starts, so the
++        // frontend picks up the session ID from the DetachableWriter's
++        // forwarded messages.
++        const detachable = dependencies.createDetachableWriter(
++          `pending-${Date.now()}`, // temporary key — replaced by builder with real sessionId
++          provider,
++          writer,
++        );
++        dependencies.runBuilderWorkflow(data.command ?? '', data.options ?? {}, detachable, provider)
++          .catch((err: unknown) => {
++            console.error('[builder] Run failed:', err instanceof Error ? err.message : String(err));
++          });
+         return;
+       }
+ 
+@@ -221,6 +239,30 @@ export function handleChatConnection(
+         return;
+       }
+ 
++      // Reconnect to an active builder run from a new browser tab/reload
++      if (messageType === 'builder-reattach') {
++        const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
++        const fromIndex = typeof data.fromIndex === 'number' ? data.fromIndex : 0;
++        if (sessionId) {
++          const dw = dependencies.getDetachableWriter(sessionId);
++          if (dw) {
++            dw.attach(writer, fromIndex);
++            writer.send({
++              type: 'builder-reattach-ok',
++              sessionId,
++              messageCount: dw.getMessageCount(),
++            });
++          } else {
++            writer.send({
++              type: 'builder-reattach-fail',
++              sessionId,
++              reason: 'no-active-run',
++            });
++          }
++        }
++        return;
++      }
++
+       if (messageType === 'cursor-abort') {
+         const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
+         const success = dependencies.abortCursorSession(sessionId);
+@@ -301,5 +343,8 @@ export function handleChatConnection(
+   ws.on('close', () => {
+     console.log('[INFO] Chat client disconnected');
+     connectedClients.delete(ws);
++    // Detach all builder runs that were using this writer —
++    // the pipeline continues running server-side.
++    dependencies.detachWritersByWs(writer);
+   });
+ }
+diff --git a/server/routes/builder.js b/server/routes/builder.js
+new file mode 100644
+index 0000000..5a1c6c9
+--- /dev/null
++++ b/server/routes/builder.js
+@@ -0,0 +1,88 @@
++import { Router } from 'express';
++import { getActiveBuilderRuns, abortBuilderWorkflow } from '../builder-mode.js';
++import { getActiveDetachableWriters } from '../builder-detachable-writer.js';
++
++const router = Router();
++
++/**
++ * GET /api/builder/runs
++ * List active builder runs (in-memory only — these are live, running builds).
++ */
++router.get('/runs', (_req, res) => {
++  const activeRuns = getActiveBuilderRuns();
++  const detachableWriters = getActiveDetachableWriters();
++  const runs = [];
++
++  for (const [sessionId, runState] of activeRuns) {
++    const dw = detachableWriters.get(sessionId);
++    runs.push({
++      sessionId,
++      provider: runState.provider,
++      command: dw?.command || runState.record?.command || '',
++      phase: runState.record?.phase || 'initializing',
++      status: runState.record?.status || 'running',
++      aborted: runState.aborted,
++      attached: dw ? dw.isAttached() : false,
++      hasPendingApprovals: dw ? dw.hasPendingApprovals() : false,
++      messageCount: dw ? dw.getMessageCount() : 0,
++      createdAt: runState.record?.createdAt || null,
++      updatedAt: runState.record?.updatedAt || null,
++      projectPath: runState.record?.projectPath || '',
++      metrics: runState.record?.metrics || null,
++    });
++  }
++
++  res.json({ runs });
++});
++
++/**
++ * GET /api/builder/runs/:sessionId
++ * Get single run status.
++ */
++router.get('/runs/:sessionId', (req, res) => {
++  const { sessionId } = req.params;
++  const activeRuns = getActiveBuilderRuns();
++  const runState = activeRuns.get(sessionId);
++
++  if (!runState) {
++    res.status(404).json({ error: 'Run not found or not active' });
++    return;
++  }
++
++  const detachableWriters = getActiveDetachableWriters();
++  const dw = detachableWriters.get(sessionId);
++
++  res.json({
++    sessionId,
++    provider: runState.provider,
++    command: dw?.command || runState.record?.command || '',
++    phase: runState.record?.phase || 'initializing',
++    status: runState.record?.status || 'running',
++    aborted: runState.aborted,
++    attached: dw ? dw.isAttached() : false,
++    hasPendingApprovals: dw ? dw.hasPendingApprovals() : false,
++    messageCount: dw ? dw.getMessageCount() : 0,
++    createdAt: runState.record?.createdAt || null,
++    updatedAt: runState.record?.updatedAt || null,
++    projectPath: runState.record?.projectPath || '',
++    metrics: runState.record?.metrics || null,
++    tasks: runState.record?.tasks || [],
++  });
++});
++
++/**
++ * POST /api/builder/runs/:sessionId/abort
++ * Abort a builder run via REST (doesn't require active WebSocket).
++ */
++router.post('/runs/:sessionId/abort', async (req, res) => {
++  const { sessionId } = req.params;
++  try {
++    const success = await abortBuilderWorkflow(sessionId);
++    res.json({ success });
++  } catch (error) {
++    const message = error instanceof Error ? error.message : String(error);
++    res.status(500).json({ error: message });
++  }
++});
++
++export default router;

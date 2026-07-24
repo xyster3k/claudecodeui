@@ -1,0 +1,46 @@
+diff --git a/server/builder-mode.js b/server/builder-mode.js
+index a6bd14e..c4bb6f2 100644
+--- a/server/builder-mode.js
++++ b/server/builder-mode.js
+@@ -754,7 +754,7 @@ const replaceBuilderTasks = async (runState, tasks, extraFields = {}) => {
+   await persistBuilderRunState(runState);
+ };
+ 
+-const updateBuilderTaskState = async (runState, taskId, patch) => {
++const updateBuilderTaskState = async (runState, taskId, patch, { waitForPersistence = true } = {}) => {
+   if (!runState?.record?.tasks) {
+     return null;
+   }
+@@ -771,7 +771,11 @@ const updateBuilderTaskState = async (runState, taskId, patch) => {
+     ...(nextPatch || {}),
+     updatedAt: new Date().toISOString(),
+   });
+-  await persistBuilderRunState(runState);
++  if (waitForPersistence) {
++    await persistBuilderRunState(runState);
++  } else {
++    void persistBuilderRunState(runState).catch(() => {});
++  }
+   return runState.record.tasks[taskIndex];
+ };
+ 
+@@ -1938,8 +1942,8 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+         reviewerPasses: isReviewer ? current.reviewerPasses + 1 : current.reviewerPasses,
+         assignedProvider: actorProvider,
+         lastError: '',
+-      }));
+-      await appendBuilderRunEvent(runState, {
++      }), { waitForPersistence: false });
++      void appendBuilderRunEvent(runState, {
+         kind: 'slice_pass_started',
+         summary: `${actorLabel} started: ${task.title}`,
+         taskId: task.id,
+@@ -1947,7 +1951,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+         actorType,
+         actorProvider,
+         actorModel,
+-      });
++      }).catch(() => {});
+ 
+       const actorWriter = new BufferedWriter(
+         `${sessionId}-${actorType}-${task.id}-pass-${passNumber}`,

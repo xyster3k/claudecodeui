@@ -1,0 +1,502 @@
+diff --git a/server/builder-mode.js b/server/builder-mode.js
+index 944d0a0..ff6e133 100644
+--- a/server/builder-mode.js
++++ b/server/builder-mode.js
+@@ -37,6 +37,9 @@ const QA_PROVIDER_FALLBACKS = {
+ };
+ const DEFAULT_MAX_TASK_PASSES = 3;
+ const DEFAULT_MAX_SLICE_REVIEWER_PASSES = 1;
++const DEFAULT_MAX_REPLAN_ATTEMPTS = 2;
++const DEFAULT_WORKER_TIMEOUT_MS = 10 * 60 * 1000;
++const DEFAULT_PLANNER_TIMEOUT_MS = 15 * 60 * 1000;
+ 
+ const PROVIDER_RUNNERS = {
+   claude: queryClaudeSDK,
+@@ -456,6 +459,9 @@ const withDefaultBuilderConfig = (config = {}) => ({
+     plannerModel: null,
+     workerModel: null,
+     integratorModel: null,
++    workerTimeoutMs: DEFAULT_WORKER_TIMEOUT_MS,
++    plannerTimeoutMs: DEFAULT_PLANNER_TIMEOUT_MS,
++    maxReplanAttempts: DEFAULT_MAX_REPLAN_ATTEMPTS,
+     ...(config.orchestration || {}),
+   },
+   approvals: {
+@@ -1041,6 +1047,24 @@ const runProviderTask = async ({ provider, prompt, options, writer }) => {
+   }, writer);
+ };
+ 
++const runProviderTaskWithTimeout = async ({ provider, prompt, options, writer, timeoutMs }) => {
++  if (!timeoutMs || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
++    return runProviderTask({ provider, prompt, options, writer });
++  }
++
++  const timeoutPromise = new Promise((_, reject) => {
++    const timer = setTimeout(() => {
++      reject(new Error(`Provider task timed out after ${Math.round(timeoutMs / 1000)}s`));
++    }, timeoutMs);
++    timer.unref?.();
++  });
++
++  return Promise.race([
++    runProviderTask({ provider, prompt, options, writer }),
++    timeoutPromise,
++  ]);
++};
++
+ const runItemsWithConcurrency = async (items, limit, worker) => {
+   const results = new Array(items.length);
+   let currentIndex = 0;
+@@ -1376,6 +1400,8 @@ const buildSliceExecutionPrompt = ({
+   projectPath,
+   command,
+   prdMarkdown,
++  planMarkdown,
++  siblingSliceTitles,
+   task,
+   plannerFeedback,
+   previousSummary,
+@@ -1391,6 +1417,11 @@ const buildSliceExecutionPrompt = ({
+   'Full PRD:',
+   prdMarkdown,
+   '',
++  planMarkdown ? 'Planner execution plan:' : '',
++  planMarkdown || '',
++  '',
++  siblingSliceTitles?.length ? `Other worker slices running in parallel: ${siblingSliceTitles.join(', ')}` : '',
++  '',
+   'Owned slice:',
+   summarizeTaskDefinition(task),
+   '',
+@@ -1575,71 +1606,23 @@ const normalizePlannerTasks = (tasks, maxWorkers) => {
+   }));
+ };
+ 
+-const fallbackPlan = (command, projectPath, maxWorkers, parallelWorkers) => {
+-  const tasks = normalizePlannerTasks([
+-    {
+-      title: 'Repository inspection and architecture alignment',
+-      details: 'Inspect the current project structure, identify the relevant implementation areas, and define concrete ownership boundaries for the remaining work.',
+-      ownership: 'Read-heavy planning and shared architectural context.',
+-      depends_on_task_ids: [],
+-    },
+-    {
+-      title: 'Primary feature implementation',
+-      details: `Implement the main feature requested by the user: ${command}`,
+-      ownership: 'Core logic and primary product behavior.',
+-      depends_on_task_ids: [1],
+-    },
+-    {
+-      title: 'UI and workflow integration',
+-      details: 'Integrate the feature into the existing UI, routes, state flow, and user interactions.',
+-      ownership: 'Screens, interactions, and integration touch points.',
+-      depends_on_task_ids: [1],
+-    },
+-    {
+-      title: 'Final integration and consistency cleanup',
+-      details: 'Resolve cross-cutting issues, align naming/data flow, and stitch shared files together.',
+-      ownership: 'Shared glue and consistency.',
+-      depends_on_task_ids: [2, 3],
+-    },
+-  ], maxWorkers);
+-
+-  return {
+-    projectStateSummary: `Planner fallback used for project \`${projectPath}\` because structured planning output was not parsed successfully.`,
+-    executionPlan: 'Inspect the repository, complete foundational data/model work first, then move through implementation slices in dependency order before final integration and QA.',
+-    assumptions: ['The repository already contains the main feature entry points and shared infrastructure needed for the requested change.'],
+-    risks: ['Planner output was not structured, so this fallback plan may be less specific than desired.'],
+-    languages: ['Primary site language'],
+-    pages: ['Relevant feature entry points'],
+-    tasks,
+-    prdMarkdown: buildPrdMarkdown({
+-      command,
+-      projectPath,
+-      projectStateSummary: `Planner fallback used for project \`${projectPath}\` because structured planning output was not parsed successfully.`,
+-      languages: ['Primary site language'],
+-      pages: ['Relevant feature entry points'],
+-      tasks,
+-      maxParallelWorkers: parallelWorkers,
+-    }),
+-    planMarkdown: buildPlannerPlanMarkdown({
+-      command,
+-      projectPath,
+-      projectStateSummary: `Planner fallback used for project \`${projectPath}\` because structured planning output was not parsed successfully.`,
+-      executionPlan: 'Inspect the repository, complete foundational data/model work first, then move through implementation slices in dependency order before final integration and QA.',
+-      assumptions: ['The repository already contains the main feature entry points and shared infrastructure needed for the requested change.'],
+-      risks: ['Planner output was not structured, so this fallback plan may be less specific than desired.'],
+-      tasks,
+-      maxParallelWorkers: parallelWorkers,
+-    }),
+-  };
++const failPlannerParse = (projectPath) => {
++  throw new Error(
++    `Planner for project \`${projectPath}\` did not return valid structured JSON. `
++    + 'The builder run cannot proceed without a concrete plan. '
++    + 'Check planner model availability and prompt length.',
++  );
+ };
+ 
+-const buildPlannerPrompt = ({ command, projectPath, maxWorkers, parallelWorkers }) => [
+-  'You are the planner for Builder Mode.',
++const buildPlannerPrompt = ({ command, projectPath, maxWorkers, parallelWorkers, rejectionFeedback, attemptNumber }) => [
++  'You are the senior architect and planner for Builder Mode.',
+   `Project root: ${projectPath}`,
+   '',
+   'Your job:',
+-  '- Inspect the current repository state before planning.',
+-  '- Understand the existing architecture, relevant modules, and likely touched files.',
++  '- Deeply analyze the project before planning. Read key files, understand the module graph, and map existing conventions.',
++  '- Find the BEST implementation approach, not just any approach. Consider at least two alternatives and choose the safest, most maintainable one.',
++  '- Explicitly verify the plan will not break existing functionality. Identify and document regression risks.',
++  '- Do not simplify, shortcut, or degrade existing working features. Preserve all current behavior unless the request explicitly asks to change it.',
+   '- Create a feature-oriented execution plan for parallel worker agents.',
+   '- Each worker will know the whole project, but must own a distinct primary slice.',
+   `- Return between 2 and ${maxWorkers} tasks.`,
+@@ -1652,9 +1635,13 @@ const buildPlannerPrompt = ({ command, projectPath, maxWorkers, parallelWorkers
+   '- Include a short project-state summary based on what you inspected.',
+   '- Include a concise execution strategy that documents how the work should proceed.',
+   '- Include explicit assumptions and notable risks so the plan is documented, not implicit.',
++  '- Document why the chosen approach is better than the alternatives you considered.',
+   '- Mention the main touched areas or file groups when you can infer them.',
+   '- Use task dependencies when one slice clearly depends on another slice finishing first.',
+   '',
++  attemptNumber > 1 ? `This is re-planning attempt ${attemptNumber}. The previous plan was rejected by the coverage reviewer.` : '',
++  rejectionFeedback ? `Coverage rejection feedback from the previous attempt:\n${rejectionFeedback}` : '',
++  '',
+   'User request:',
+   command,
+   '',
+@@ -1684,14 +1671,14 @@ const buildPlannerPrompt = ({ command, projectPath, maxWorkers, parallelWorkers
+ const parsePlannerOutput = ({ text, command, projectPath, maxWorkers, parallelWorkers }) => {
+   const jsonBlock = extractJsonBlock(text);
+   if (!jsonBlock) {
+-    return fallbackPlan(command, projectPath, maxWorkers, parallelWorkers);
++    failPlannerParse(projectPath);
+   }
+ 
+   try {
+     const parsed = JSON.parse(stripCodeFences(jsonBlock));
+     const tasks = normalizePlannerTasks(parsed?.tasks, maxWorkers);
+     if (tasks.length === 0) {
+-      return fallbackPlan(command, projectPath, maxWorkers, parallelWorkers);
++      failPlannerParse(projectPath);
+     }
+ 
+     const projectStateSummary = readString(parsed?.project_state_summary)
+@@ -1733,8 +1720,11 @@ const parsePlannerOutput = ({ text, command, projectPath, maxWorkers, parallelWo
+         maxParallelWorkers: parallelWorkers,
+       }),
+     };
+-  } catch {
+-    return fallbackPlan(command, projectPath, maxWorkers, parallelWorkers);
++  } catch (err) {
++    if (err?.message?.includes('did not return valid structured JSON')) {
++      throw err;
++    }
++    failPlannerParse(projectPath);
+   }
+ };
+ 
+@@ -1854,6 +1844,9 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       0,
+       3,
+     );
++    const workerTimeoutMs = clampInteger(builderConfig.orchestration.workerTimeoutMs, DEFAULT_WORKER_TIMEOUT_MS, 30000, 30 * 60 * 1000);
++    const plannerTimeoutMs = clampInteger(builderConfig.orchestration.plannerTimeoutMs, DEFAULT_PLANNER_TIMEOUT_MS, 30000, 30 * 60 * 1000);
++    const maxReplanAttempts = clampInteger(builderConfig.orchestration.maxReplanAttempts, DEFAULT_MAX_REPLAN_ATTEMPTS, 0, 5);
+     const plannerReasoning = normalizeReasoningLevel(builderConfig.reasoning.planner, DEFAULT_STAGE_REASONING.planner);
+     const workerReasoning = normalizeReasoningLevel(builderConfig.reasoning.worker, DEFAULT_STAGE_REASONING.worker);
+     const integratorReasoning = normalizeReasoningLevel(builderConfig.reasoning.integrator, DEFAULT_STAGE_REASONING.integrator);
+@@ -1948,7 +1941,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+     const plannerWriter = new BufferedWriter(`${sessionId}-planner`, provider, (childSessionId, childProvider) => {
+       registerChildSession(childSessionId, childProvider, 'planner');
+     });
+-    await runProviderTask({
++    await runProviderTaskWithTimeout({
+       provider,
+       prompt: applyReasoningPrefix(buildPlannerPrompt({
+         command,
+@@ -1963,6 +1956,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+         model: plannerModel || options.model,
+       },
+       writer: plannerWriter,
++      timeoutMs: plannerTimeoutMs,
+     });
+ 
+     if (runState.aborted) {
+@@ -1976,7 +1970,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       return;
+     }
+ 
+-    const plannerResult = parsePlannerOutput({
++    let plannerResult = parsePlannerOutput({
+       text: plannerWriter.getSummary().text,
+       command,
+       projectPath,
+@@ -1990,8 +1984,8 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       projectPath,
+       provider,
+     });
+-    const prdMarkdown = plannerResult.prdMarkdown;
+-    const planMarkdown = plannerResult.planMarkdown;
++    let prdMarkdown = plannerResult.prdMarkdown;
++    let planMarkdown = plannerResult.planMarkdown;
+     const {
+       requestPath,
+       prdPath,
+@@ -2048,6 +2042,8 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       `Integrator model: \`${integratorModel || options.model || 'default'}\``,
+       `Reasoning profile: planner=${plannerReasoning}, worker=${workerReasoning}, integrator=${integratorReasoning}, qa=${qaReasoning}`,
+       `Planner supervision: ${plannerCheckpointReview ? `enabled (${maxTaskPasses} max pass(es) per task, ${maxSliceReviewerPasses} slice reviewer pass(es))` : 'disabled'}`,
++      `Timeouts: worker=${Math.round(workerTimeoutMs / 1000)}s, planner/integrator/qa=${Math.round(plannerTimeoutMs / 1000)}s`,
++      `Re-plan attempts on coverage rejection: ${maxReplanAttempts}`,
+       !builderConfig.qa.enabled
+         ? 'QA stage: disabled by builder config'
+         : null,
+@@ -2070,7 +2066,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       stage: BUILDER_RUN_PHASES.planning,
+     });
+     const planReviewWriter = new BufferedWriter(`${sessionId}-plan-review`, provider, registerChildSession);
+-    await runProviderTask({
++    await runProviderTaskWithTimeout({
+       provider,
+       prompt: applyReasoningPrefix(buildPlanCoveragePrompt({
+         command,
+@@ -2086,6 +2082,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+         model: plannerModel || options.model,
+       },
+       writer: planReviewWriter,
++      timeoutMs: plannerTimeoutMs,
+     });
+ 
+     if (runState.aborted) {
+@@ -2099,8 +2096,8 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       return;
+     }
+ 
+-    const planCoverageReview = parsePlanCoverageReview(planReviewWriter.getSummary().text);
+-    const planCoverageMarkdown = buildPlanCoverageReviewMarkdown({
++    let planCoverageReview = parsePlanCoverageReview(planReviewWriter.getSummary().text);
++    let planCoverageMarkdown = buildPlanCoverageReviewMarkdown({
+       command,
+       projectPath,
+       approved: planCoverageReview.approved,
+@@ -2144,20 +2141,129 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+     ].join('\n'));
+ 
+     if (!planCoverageReview.approved) {
+-      await reportStage('Plan coverage review rejected the plan before implementation', 'failed', {
+-        stage: BUILDER_RUN_PHASES.failed,
+-      });
+-      await setBuilderRunOutcome(runState, 'failed', BUILDER_STOP_REASONS.failed, {
+-        lastEvent: 'Plan coverage review rejected the plan before implementation',
+-        errorMessage: [
+-          planCoverageReview.coverageSummary,
+-          ...planCoverageReview.missingRequirements,
+-          ...planCoverageReview.ambiguousPoints,
+-          ...planCoverageReview.outOfScopeRisks,
+-        ].filter(Boolean).join('\n'),
+-      });
+-      sendNormalized(writer, { kind: 'complete', sessionId, provider, success: false, exitCode: 1 });
+-      return;
++      const rejectionFeedback = [
++        planCoverageReview.coverageSummary,
++        planCoverageReview.missingRequirements.length > 0 ? `Missing requirements:\n${formatBulletList(planCoverageReview.missingRequirements)}` : '',
++        planCoverageReview.ambiguousPoints.length > 0 ? `Ambiguous points:\n${formatBulletList(planCoverageReview.ambiguousPoints)}` : '',
++        planCoverageReview.outOfScopeRisks.length > 0 ? `Out-of-scope risks:\n${formatBulletList(planCoverageReview.outOfScopeRisks)}` : '',
++      ].filter(Boolean).join('\n\n');
++
++      let replanApproved = false;
++      for (let replanAttempt = 1; replanAttempt <= maxReplanAttempts; replanAttempt += 1) {
++        if (runState.aborted) {
++          break;
++        }
++
++        await reportStage(`Re-planning attempt ${replanAttempt}/${maxReplanAttempts} after coverage rejection`, 'in_progress', {
++          stage: BUILDER_RUN_PHASES.planning,
++        });
++        sendAssistantText(writer, sessionId, provider, `### Re-planning attempt ${replanAttempt}\nFeeding rejection feedback back to the planner.`);
++
++        const replanWriter = new BufferedWriter(`${sessionId}-replan-${replanAttempt}`, provider, (childSessionId, childProvider) => {
++          registerChildSession(childSessionId, childProvider, 'planner');
++        });
++        await runProviderTaskWithTimeout({
++          provider,
++          prompt: applyReasoningPrefix(buildPlannerPrompt({
++            command,
++            projectPath,
++            maxWorkers,
++            parallelWorkers,
++            rejectionFeedback,
++            attemptNumber: replanAttempt + 1,
++          }), plannerReasoning),
++          options: {
++            ...options,
++            cwd: projectPath,
++            projectPath,
++            model: plannerModel || options.model,
++          },
++          writer: replanWriter,
++          timeoutMs: plannerTimeoutMs,
++        });
++
++        if (runState.aborted) {
++          break;
++        }
++
++        const replanResult = parsePlannerOutput({
++          text: replanWriter.getSummary().text,
++          command,
++          projectPath,
++          maxWorkers,
++          parallelWorkers,
++        });
++
++        plannerSessionId = replanWriter.getSessionId() || plannerSessionId;
++        workerTasks.splice(0, workerTasks.length, ...replanResult.tasks);
++        plannerResult = replanResult;
++        prdMarkdown = replanResult.prdMarkdown;
++        planMarkdown = replanResult.planMarkdown;
++
++        const replanReviewWriter = new BufferedWriter(`${sessionId}-replan-review-${replanAttempt}`, provider, registerChildSession);
++        await runProviderTaskWithTimeout({
++          provider,
++          prompt: applyReasoningPrefix(buildPlanCoveragePrompt({
++            command,
++            prdMarkdown: replanResult.prdMarkdown,
++            planMarkdown: replanResult.planMarkdown,
++            tasks: replanResult.tasks,
++            projectPath,
++          }), plannerReasoning),
++          options: {
++            ...options,
++            cwd: projectPath,
++            projectPath,
++            model: plannerModel || options.model,
++          },
++          writer: replanReviewWriter,
++          timeoutMs: plannerTimeoutMs,
++        });
++
++        const replanCoverage = parsePlanCoverageReview(replanReviewWriter.getSummary().text);
++        sendAssistantText(writer, sessionId, provider, [
++          `### Re-plan coverage review (attempt ${replanAttempt})`,
++          `Approved: ${replanCoverage.approved ? 'yes' : 'no'}`,
++          replanCoverage.coverageSummary,
++        ].join('\n'));
++
++        if (replanCoverage.approved) {
++          replanApproved = true;
++          planCoverageReview = replanCoverage;
++          planCoverageMarkdown = buildPlanCoverageReviewMarkdown({
++            command,
++            projectPath,
++            approved: replanCoverage.approved,
++            coverageSummary: replanCoverage.coverageSummary,
++            missingRequirements: replanCoverage.missingRequirements,
++            ambiguousPoints: replanCoverage.ambiguousPoints,
++            outOfScopeRisks: replanCoverage.outOfScopeRisks,
++          });
++          await setBuilderRunPhase(runState, BUILDER_RUN_PHASES.planning, {
++            planCoverageApproved: true,
++            planCoverageSummary: replanCoverage.coverageSummary,
++            lastEvent: `Plan approved on re-planning attempt ${replanAttempt}`,
++          });
++          break;
++        }
++      }
++
++      if (!replanApproved) {
++        await reportStage(`Plan coverage review rejected the plan after ${maxReplanAttempts} re-planning attempt(s)`, 'failed', {
++          stage: BUILDER_RUN_PHASES.failed,
++        });
++        await setBuilderRunOutcome(runState, 'failed', BUILDER_STOP_REASONS.failed, {
++          lastEvent: `Plan coverage review rejected the plan after ${maxReplanAttempts} re-planning attempt(s)`,
++          errorMessage: [
++            planCoverageReview.coverageSummary,
++            ...planCoverageReview.missingRequirements,
++            ...planCoverageReview.ambiguousPoints,
++            ...planCoverageReview.outOfScopeRisks,
++          ].filter(Boolean).join('\n'),
++        });
++        sendNormalized(writer, { kind: 'complete', sessionId, provider, success: false, exitCode: 1 });
++        return;
++      }
+     }
+ 
+     if (builderConfig.approvals.riskyChanges && RISKY_CHANGE_PATTERN.test(command)) {
+@@ -2241,7 +2347,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+         registerChildSession(childSessionId, childProvider, 'planner');
+       });
+ 
+-      await runProviderTask({
++      await runProviderTaskWithTimeout({
+         provider,
+         prompt: applyReasoningPrefix(buildPlannerCheckpointPrompt({
+           command,
+@@ -2267,6 +2373,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+           resume: Boolean(plannerSessionId),
+         },
+         writer: checkpointWriter,
++        timeoutMs: plannerTimeoutMs,
+       });
+ 
+       plannerSessionId = checkpointWriter.getSessionId() || plannerSessionId;
+@@ -2347,14 +2454,17 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       );
+ 
+       try {
+-        await runProviderTask({
++        await runProviderTaskWithTimeout({
+           provider: actorProvider,
++          timeoutMs: isReviewer ? plannerTimeoutMs : workerTimeoutMs,
+           prompt: applyReasoningPrefix(buildSliceExecutionPrompt({
+             actorLabel,
+             actorRole,
+             projectPath,
+             command,
+             prdMarkdown,
++            planMarkdown,
++            siblingSliceTitles: workerTasks.filter((t) => t.id !== task.id).map((t) => `Task ${t.id}: ${t.title}`),
+             task,
+             plannerFeedback,
+             previousSummary,
+@@ -2758,8 +2868,9 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       stage: BUILDER_RUN_PHASES.integration,
+     });
+ 
+-    await runProviderTask({
++    await runProviderTaskWithTimeout({
+       provider,
++      timeoutMs: plannerTimeoutMs,
+       prompt: applyReasoningPrefix([
+         'You are the final integrator for a coordinated builder run.',
+         `Project root: ${projectPath}`,
+@@ -2777,10 +2888,14 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+         formatBulletList(workerTasks.map((task) => `${task.title}${task.details ? `: ${task.details}` : ''}`)),
+         '',
+         'Requirements:',
+-        '- Review the repository after all worker changes.',
++        '- Review the repository after all worker changes and verify the combined output actually works as a system.',
++        '- Adapt and normalize code to match existing project conventions (naming, exports, style).',
++        '- Fix fundamental approach mistakes if they would cause runtime failures. You have authority to rewrite broken patterns.',
++        '- Check imports, exports, and data flow consistency across all touched files.',
+         '- Reconcile shared files and resolve inconsistencies between slices.',
+         '- Finish missing glue code, naming alignment, and shared state integration.',
+-        '- Do not redo the whole feature from scratch. Integrate what exists.',
++        '- Ensure nothing was broken in existing functionality. If a worker removed or degraded an existing feature, restore it.',
++        '- Do not redo the whole feature from scratch. Integrate what exists, but fix what is broken.',
+       ].join('\n'), integratorReasoning),
+       options: {
+         ...options,
+@@ -2841,8 +2956,9 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+       const qaWriter = new BufferedWriter(`${sessionId}-qa`, qaProvider, (childSessionId, childProvider) => {
+         registerChildSession(childSessionId, childProvider, 'qa');
+       });
+-      await runProviderTask({
++      await runProviderTaskWithTimeout({
+         provider: qaProvider,
++        timeoutMs: plannerTimeoutMs,
+         prompt: applyReasoningPrefix([
+           'You are the final QA reviewer for a coordinated builder run.',
+           `Project root: ${projectPath}`,

@@ -1,0 +1,48 @@
+diff --git a/server/builder-mode.js b/server/builder-mode.js
+index df341c8..cf48fef 100644
+--- a/server/builder-mode.js
++++ b/server/builder-mode.js
+@@ -42,6 +42,21 @@ const DEFAULT_MAX_SLICE_REVIEWER_PASSES = 1;
+ const DEFAULT_MAX_REPLAN_ATTEMPTS = 2;
+ const DEFAULT_WORKER_TIMEOUT_MS = 10 * 60 * 1000;
+ const DEFAULT_PLANNER_TIMEOUT_MS = 15 * 60 * 1000;
++const DOCKER_ENVIRONMENT_NOTICE = [
++  '## Execution Environment',
++  '',
++  'You are running inside a Docker container on a build/CI server. This is NOT the production server.',
++  '- You CAN read and edit any files in the project directory.',
++  '- You CAN run shell commands (npm, node, git, cat, ls, etc.) in the project directory.',
++  '- You CANNOT access production databases or live services directly from this container.',
++  '- If you need to verify behavior on a live server, check CLAUDE.md in the project root for SSH commands and server addresses.',
++  '- Do NOT repeatedly retry a failing command. If a command fails, diagnose WHY (wrong path? missing dep? network issue?) and try a DIFFERENT approach.',
++  '- Do NOT report "permission denied" or "cannot access" without first checking whether you are targeting a remote resource that requires SSH.',
++  '- For code review tasks: prioritize reading and analyzing code over running commands. Only run commands when you need to verify compilation or test results.',
++  '- If shell commands produce sandbox or permission errors, STOP retrying and switch to file-based analysis instead.',
++  '',
++].join('\n');
++
+ 
+ const PROVIDER_RUNNERS = {
+   claude: queryClaudeSDK,
+@@ -3146,6 +3161,7 @@ export async function runBuilderWorkflow(command, options = {}, writer, provider
+           '',
+           'Worker results:',
+           formatWorkerResults(workerResults),
++          DOCKER_ENVIRONMENT_NOTICE,
+           '',
+           'Context:',
+           '- The final integrator has already run.',
+diff --git a/server/tester-mode.js b/server/tester-mode.js
+index a56be8c..2444064 100644
+--- a/server/tester-mode.js
++++ b/server/tester-mode.js
+@@ -210,6 +210,9 @@ const loadBuilderArtifacts = async (projectPath, builderRunId) => {
+ const ENVIRONMENT_SETUP_INSTRUCTIONS = [
+   '## Environment & Full System Access',
+   '',
++  'IMPORTANT: You are running inside a Docker container on a build/CI server. This is NOT the production server.',
++  'Commands you run here affect only the local project copy. To interact with production, you MUST use SSH (see CLAUDE.md).',
++  '',
+   'You have FULL shell access with all permissions bypassed. Use it aggressively.',
+   'You can run ANY command, install ANY package, SSH into remote servers, query databases, read logs — whatever is needed.',
+   '',

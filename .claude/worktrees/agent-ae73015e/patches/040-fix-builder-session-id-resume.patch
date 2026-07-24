@@ -1,0 +1,17 @@
+diff --git a/server/builder-mode.js b/server/builder-mode.js
+index 08be097..d6961dc 100644
+--- a/server/builder-mode.js
++++ b/server/builder-mode.js
+@@ -1871,6 +1871,12 @@ const parsePlanCoverageReview = (text) => {
+ export async function runBuilderWorkflow(command, options = {}, writer, provider = 'claude') {
+   const sessionId = `builder-${randomUUID()}`;
+   const projectPath = options.projectPath || options.cwd || process.cwd();
++
++  // Strip sessionId/resume from frontend options so child tasks never attempt
++  // --resume with the builder's non-UUID ID or a stale session from the frontend.
++  delete options.sessionId;
++  delete options.resume;
++
+   const runState = {
+     sessionId,
+     provider,

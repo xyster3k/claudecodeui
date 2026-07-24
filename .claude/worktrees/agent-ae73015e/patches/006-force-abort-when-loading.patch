@@ -1,0 +1,81 @@
+diff --git a/server/claude-sdk.js b/server/claude-sdk.js
+index db3a205..0e55fce 100644
+--- a/server/claude-sdk.js
++++ b/server/claude-sdk.js
+@@ -752,18 +752,23 @@ async function abortClaudeSDKSession(sessionId) {
+   try {
+     console.log(`Aborting SDK session: ${sessionId}`);
+ 
+-    // Call interrupt() on the query instance
+-    await session.instance.interrupt();
+-
+-    // Update session status
++    // Remove from map FIRST so duplicate clicks are no-ops
+     session.status = 'aborted';
++    removeSession(sessionId);
++
++    // Fire-and-forget interrupt — don't await, it may hang
++    Promise.resolve(session.instance.interrupt()).catch(err =>
++      console.warn(`interrupt() rejected for ${sessionId}:`, err)
++    );
++
++    // Force-terminate the async iterator so the for-await loop exits
++    if (typeof session.instance.return === 'function') {
++      Promise.resolve(session.instance.return()).catch(() => {});
++    }
+ 
+     // Clean up temporary image files
+     await cleanupTempFiles(session.tempImagePaths, session.tempDir);
+ 
+-    // Clean up session
+-    removeSession(sessionId);
+-
+     return true;
+   } catch (error) {
+     console.error(`Error aborting session ${sessionId}:`, error);
+diff --git a/src/components/chat/hooks/useChatComposerState.ts b/src/components/chat/hooks/useChatComposerState.ts
+index c53cd01..fb7c3fc 100644
+--- a/src/components/chat/hooks/useChatComposerState.ts
++++ b/src/components/chat/hooks/useChatComposerState.ts
+@@ -850,10 +850,6 @@ export function useChatComposerState({
+   }, [resetCommandMenuState]);
+ 
+   const handleAbortSession = useCallback(() => {
+-    if (!canAbortSession) {
+-      return;
+-    }
+-
+     const pendingSessionId =
+       typeof window !== 'undefined' ? sessionStorage.getItem('pendingSessionId') : null;
+     const cursorSessionId =
+@@ -880,7 +876,7 @@ export function useChatComposerState({
+       sessionId: targetSessionId,
+       provider,
+     });
+-  }, [canAbortSession, currentSessionId, pendingViewSessionRef, provider, selectedSession?.id, sendMessage]);
++  }, [currentSessionId, pendingViewSessionRef, provider, selectedSession?.id, sendMessage]);
+ 
+   const handleGrantToolPermission = useCallback(
+     (suggestion: { entry: string; toolName: string }) => {
+diff --git a/src/components/chat/view/ChatInterface.tsx b/src/components/chat/view/ChatInterface.tsx
+index 2e923d7..5c31a60 100644
+--- a/src/components/chat/view/ChatInterface.tsx
++++ b/src/components/chat/view/ChatInterface.tsx
+@@ -246,7 +246,7 @@ function ChatInterface({
+   });
+ 
+   useEffect(() => {
+-    if (!isLoading || !canAbortSession) {
++    if (!isLoading) {
+       return;
+     }
+ 
+@@ -263,7 +263,7 @@ function ChatInterface({
+     return () => {
+       document.removeEventListener('keydown', handleGlobalEscape, { capture: true });
+     };
+-  }, [canAbortSession, handleAbortSession, isLoading]);
++  }, [handleAbortSession, isLoading]);
+ 
+   useEffect(() => {
+     return () => {

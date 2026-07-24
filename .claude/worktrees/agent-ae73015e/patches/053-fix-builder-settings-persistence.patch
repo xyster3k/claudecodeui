@@ -1,0 +1,33 @@
+diff --git a/src/components/settings/hooks/useSettingsController.ts b/src/components/settings/hooks/useSettingsController.ts
+index 7df41b3..95eab5d 100644
+--- a/src/components/settings/hooks/useSettingsController.ts
++++ b/src/components/settings/hooks/useSettingsController.ts
+@@ -172,8 +172,26 @@ export function useSettingsController({ isOpen, initialTab }: UseSettingsControl
+   ));
+   const [codexPermissionMode, setCodexPermissionMode] = useState<CodexPermissionMode>('default');
+   const [geminiPermissionMode, setGeminiPermissionMode] = useState<GeminiPermissionMode>('default');
+-  const [builderSettings, setBuilderSettings] = useState<BuilderSettingsState>(() => createDefaultBuilderSettings());
+-  const [testerSettings, setTesterSettings] = useState<TesterSettingsState>(() => createDefaultTesterSettings());
++  const [builderSettings, setBuilderSettings] = useState<BuilderSettingsState>(() => {
++    const saved = parseJson<Partial<BuilderSettingsState>>(localStorage.getItem('builder-settings'), {});
++    if (saved && Object.keys(saved).length > 0) {
++      const defaults = createDefaultBuilderSettings();
++      return {
++        orchestration: { ...defaults.orchestration, ...saved.orchestration },
++        reasoning: { ...defaults.reasoning, ...saved.reasoning },
++        qa: { ...defaults.qa, ...saved.qa },
++        supervision: { ...defaults.supervision, ...saved.supervision },
++      };
++    }
++    return createDefaultBuilderSettings();
++  });
++  const [testerSettings, setTesterSettings] = useState<TesterSettingsState>(() => {
++    const saved = parseJson<Partial<TesterSettingsState>>(localStorage.getItem('tester-settings'), {});
++    if (saved && Object.keys(saved).length > 0) {
++      return { ...createDefaultTesterSettings(), ...saved };
++    }
++    return createDefaultTesterSettings();
++  });
+ 
+   // Auto-persist builder settings so the build pipeline always picks up the
+   // latest values, even if the user has not clicked Save Settings yet.

@@ -1,0 +1,269 @@
+diff --git a/src/components/chat/hooks/useSpeechRecognition.ts b/src/components/chat/hooks/useSpeechRecognition.ts
+new file mode 100644
+index 0000000..3afcaf9
+--- /dev/null
++++ b/src/components/chat/hooks/useSpeechRecognition.ts
+@@ -0,0 +1,121 @@
++import { useCallback, useEffect, useRef, useState } from 'react';
++
++interface SpeechRecognitionEvent {
++  results: SpeechRecognitionResultList;
++  resultIndex: number;
++}
++
++interface SpeechRecognitionErrorEvent {
++  error: string;
++}
++
++interface SpeechRecognitionInstance {
++  continuous: boolean;
++  interimResults: boolean;
++  lang: string;
++  onresult: ((event: SpeechRecognitionEvent) => void) | null;
++  onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
++  onend: (() => void) | null;
++  start: () => void;
++  stop: () => void;
++  abort: () => void;
++}
++
++declare global {
++  interface Window {
++    SpeechRecognition?: new () => SpeechRecognitionInstance;
++    webkitSpeechRecognition?: new () => SpeechRecognitionInstance;
++  }
++}
++
++function getSpeechRecognitionConstructor() {
++  if (typeof window === 'undefined') return null;
++  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
++}
++
++export function useSpeechRecognition() {
++  const [isListening, setIsListening] = useState(false);
++  const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
++  const onResultRef = useRef<((text: string) => void) | null>(null);
++  const isSupported = typeof window !== 'undefined' && Boolean(getSpeechRecognitionConstructor());
++
++  const stopListening = useCallback(() => {
++    if (recognitionRef.current) {
++      recognitionRef.current.onend = null;
++      recognitionRef.current.stop();
++      recognitionRef.current = null;
++    }
++    setIsListening(false);
++  }, []);
++
++  const startListening = useCallback(
++    (onResult: (text: string) => void) => {
++      const SpeechRecognitionCtor = getSpeechRecognitionConstructor();
++      if (!SpeechRecognitionCtor) return;
++
++      // Stop any existing session
++      if (recognitionRef.current) {
++        stopListening();
++      }
++
++      const recognition = new SpeechRecognitionCtor();
++      recognition.continuous = true;
++      recognition.interimResults = false;
++      recognition.lang = navigator.language || 'en-US';
++
++      onResultRef.current = onResult;
++
++      recognition.onresult = (event: SpeechRecognitionEvent) => {
++        let transcript = '';
++        for (let i = event.resultIndex; i < event.results.length; i++) {
++          if (event.results[i].isFinal) {
++            transcript += event.results[i][0].transcript;
++          }
++        }
++        if (transcript && onResultRef.current) {
++          onResultRef.current(transcript);
++        }
++      };
++
++      recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
++        if (event.error !== 'aborted') {
++          stopListening();
++        }
++      };
++
++      recognition.onend = () => {
++        // Auto-restart if still supposed to be listening (browser may stop after silence)
++        if (recognitionRef.current) {
++          try {
++            recognitionRef.current.start();
++          } catch {
++            stopListening();
++          }
++        }
++      };
++
++      recognitionRef.current = recognition;
++      setIsListening(true);
++
++      try {
++        recognition.start();
++      } catch {
++        stopListening();
++      }
++    },
++    [stopListening],
++  );
++
++  // Cleanup on unmount
++  useEffect(() => {
++    return () => {
++      if (recognitionRef.current) {
++        recognitionRef.current.onend = null;
++        recognitionRef.current.abort();
++        recognitionRef.current = null;
++      }
++    };
++  }, []);
++
++  return { isListening, isSupported, startListening, stopListening };
++}
+diff --git a/src/components/chat/hooks/useChatComposerState.ts b/src/components/chat/hooks/useChatComposerState.ts
+index 9b9295a..e526c6a 100644
+--- a/src/components/chat/hooks/useChatComposerState.ts
++++ b/src/components/chat/hooks/useChatComposerState.ts
+@@ -24,6 +24,7 @@ import type { Project, ProjectSession, LLMProvider } from '../../../types/app';
+ import { escapeRegExp } from '../utils/chatFormatting';
+ import { useFileMentions } from './useFileMentions';
+ import { type SlashCommand, useSlashCommands } from './useSlashCommands';
++import { useSpeechRecognition } from './useSpeechRecognition';
+ 
+ type PendingViewSession = {
+   sessionId: string | null;
+@@ -935,6 +936,22 @@ export function useChatComposerState({
+     setWorkflowMode((current: WorkflowMode) => (current === 'chat' ? 'builder' : 'chat'));
+   }, []);
+ 
++  // Voice input
++  const { isListening: isVoiceListening, isSupported: isVoiceSupported, startListening, stopListening } = useSpeechRecognition();
++
++  const toggleVoiceInput = useCallback(() => {
++    if (isVoiceListening) {
++      stopListening();
++    } else {
++      startListening((text: string) => {
++        setInput((prev: string) => {
++          const separator = prev && !prev.endsWith(' ') ? ' ' : '';
++          return prev + separator + text;
++        });
++      });
++    }
++  }, [isVoiceListening, startListening, stopListening]);
++
+   const handleGrantToolPermission = useCallback(
+     (suggestion: { entry: string; toolName: string }) => {
+       if (!suggestion || provider !== 'claude') {
+@@ -1030,6 +1047,9 @@ export function useChatComposerState({
+     handleAbortSession,
+     workflowMode,
+     toggleWorkflowMode,
++    isVoiceListening,
++    isVoiceSupported,
++    toggleVoiceInput,
+     handlePermissionDecision,
+     handleGrantToolPermission,
+     handleInputFocusChange,
+diff --git a/src/components/chat/view/ChatInterface.tsx b/src/components/chat/view/ChatInterface.tsx
+index b546b60..ee6fb78 100644
+--- a/src/components/chat/view/ChatInterface.tsx
++++ b/src/components/chat/view/ChatInterface.tsx
+@@ -170,6 +170,9 @@ function ChatInterface({
+     handleAbortSession,
+     workflowMode,
+     toggleWorkflowMode,
++    isVoiceListening,
++    isVoiceSupported,
++    toggleVoiceInput,
+     handlePermissionDecision,
+     handleGrantToolPermission,
+     handleInputFocusChange,
+@@ -360,6 +363,9 @@ function ChatInterface({
+           onAbortSession={handleAbortSession}
+           workflowMode={workflowMode}
+           onWorkflowModeToggle={toggleWorkflowMode}
++          isVoiceListening={isVoiceListening}
++          isVoiceSupported={isVoiceSupported}
++          onVoiceToggle={toggleVoiceInput}
+           provider={provider}
+           permissionMode={permissionMode}
+           onModeSwitch={cyclePermissionMode}
+diff --git a/src/components/chat/view/subcomponents/ChatComposer.tsx b/src/components/chat/view/subcomponents/ChatComposer.tsx
+index 8131e77..32bfdc1 100644
+--- a/src/components/chat/view/subcomponents/ChatComposer.tsx
++++ b/src/components/chat/view/subcomponents/ChatComposer.tsx
+@@ -11,7 +11,7 @@ import type {
+   SetStateAction,
+   TouchEvent,
+ } from 'react';
+-import { ImageIcon, MessageSquareIcon, WrenchIcon, XIcon, ArrowDownIcon } from 'lucide-react';
++import { ImageIcon, MicIcon, MessageSquareIcon, WrenchIcon, XIcon, ArrowDownIcon } from 'lucide-react';
+ import type { PendingPermissionRequest, PermissionMode, Provider, WorkflowMode } from '../../types/types';
+ import CommandMenu from './CommandMenu';
+ import ClaudeStatus from './ClaudeStatus';
+@@ -57,6 +57,9 @@ interface ChatComposerProps {
+   onAbortSession: () => void;
+   workflowMode: WorkflowMode;
+   onWorkflowModeToggle: () => void;
++  isVoiceListening: boolean;
++  isVoiceSupported: boolean;
++  onVoiceToggle: () => void;
+   provider: Provider | string;
+   permissionMode: PermissionMode | string;
+   onModeSwitch: () => void;
+@@ -114,6 +117,9 @@ export default function ChatComposer({
+   onAbortSession,
+   workflowMode,
+   onWorkflowModeToggle,
++  isVoiceListening,
++  isVoiceSupported,
++  onVoiceToggle,
+   provider,
+   permissionMode,
+   onModeSwitch,
+@@ -321,6 +327,26 @@ export default function ChatComposer({
+               <ImageIcon />
+             </PromptInputButton>
+ 
++            {isVoiceSupported && (
++              <button
++                type="button"
++                onClick={onVoiceToggle}
++                className={`rounded-lg border p-2 text-xs font-medium transition-all duration-200 sm:px-2.5 sm:py-1 ${
++                  isVoiceListening
++                    ? 'border-rose-300/60 bg-rose-50 text-rose-700 hover:bg-rose-100 dark:border-rose-600/40 dark:bg-rose-900/15 dark:text-rose-300 dark:hover:bg-rose-900/25'
++                    : 'border-border/60 bg-muted/50 text-muted-foreground hover:bg-muted'
++                }`}
++                title={isVoiceListening ? t('input.voiceInputListening') : t('input.voiceInput')}
++              >
++                <div className="flex items-center gap-1.5">
++                  <MicIcon className={`h-3.5 w-3.5 ${isVoiceListening ? 'animate-pulse' : ''}`} />
++                  <span className="hidden whitespace-nowrap sm:inline">
++                    {isVoiceListening ? t('input.voiceInputListening') : t('input.voiceInput')}
++                  </span>
++                </div>
++              </button>
++            )}
++
+             <button
+               type="button"
+               onClick={onWorkflowModeToggle}
+diff --git a/src/i18n/locales/en/chat.json b/src/i18n/locales/en/chat.json
+index de2eb7c..79f758b 100644
+--- a/src/i18n/locales/en/chat.json
++++ b/src/i18n/locales/en/chat.json
+@@ -135,6 +135,8 @@
+       "enter": "Enter to send • Shift+Enter for new line • Tab to change modes • / for slash commands"
+     },
+     "clickToChangeMode": "Click to change permission mode (or press Tab in input)",
++    "voiceInput": "Voice",
++    "voiceInputListening": "Listening...",
+     "workflowModeToggle": "Toggle between normal chat and builder workflow mode",
+     "workflowModes": {
+       "chat": "Chat",

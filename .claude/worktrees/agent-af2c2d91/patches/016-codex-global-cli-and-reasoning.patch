@@ -1,0 +1,97 @@
+diff --git a/server/openai-codex.js b/server/openai-codex.js
+index 5a7a900..ceeb823 100644
+--- a/server/openai-codex.js
++++ b/server/openai-codex.js
+@@ -21,6 +21,43 @@ import { createNormalizedMessage } from './shared/utils.js';
+ 
+ // Track active sessions
+ const activeCodexSessions = new Map();
++const DEFAULT_CODEX_EXECUTABLE = process.env.CODEX_CLI_PATH || 'codex';
++
++const normalizeCodexReasoningEffort = (value) => {
++  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
++  if (!normalized) {
++    return null;
++  }
++
++  switch (normalized) {
++    case 'minimal':
++    case 'low':
++    case 'medium':
++    case 'high':
++    case 'xhigh':
++      return normalized;
++    case 'max':
++      return 'xhigh';
++    default:
++      return null;
++  }
++};
++
++const readCodexErrorMessage = (error) => {
++  if (!error) {
++    return '';
++  }
++
++  if (typeof error === 'string') {
++    return error.trim();
++  }
++
++  if (typeof error.message === 'string' && error.message.trim()) {
++    return error.message.trim();
++  }
++
++  return String(error);
++};
+ 
+ /**
+  * Transform Codex SDK event to WebSocket message format
+@@ -199,11 +236,14 @@ export async function queryCodex(command, options = {}, ws) {
+     cwd,
+     projectPath,
+     model,
+-    permissionMode = 'default'
++    permissionMode = 'default',
++    modelReasoningEffort,
++    reasoningEffort,
+   } = options;
+ 
+   const workingDirectory = cwd || projectPath || process.cwd();
+   const { sandboxMode, approvalPolicy } = mapPermissionModeToCodexOptions(permissionMode);
++  const normalizedReasoningEffort = normalizeCodexReasoningEffort(modelReasoningEffort || reasoningEffort);
+ 
+   let codex;
+   let thread;
+@@ -213,7 +253,9 @@ export async function queryCodex(command, options = {}, ws) {
+ 
+   try {
+     // Initialize Codex SDK
+-    codex = new Codex();
++    codex = new Codex({
++      codexPathOverride: DEFAULT_CODEX_EXECUTABLE,
++    });
+ 
+     // Thread options with sandbox and approval settings
+     const threadOptions = {
+@@ -221,7 +263,8 @@ export async function queryCodex(command, options = {}, ws) {
+       skipGitRepoCheck: true,
+       sandboxMode,
+       approvalPolicy,
+-      model
++      model,
++      modelReasoningEffort: normalizedReasoningEffort || undefined,
+     };
+ 
+     // Start or resume thread
+@@ -312,9 +355,10 @@ export async function queryCodex(command, options = {}, ws) {
+ 
+       // Check if Codex SDK is available for a clearer error message
+       const installed = await providerAuthService.isProviderInstalled('codex');
++      const failureMessage = readCodexErrorMessage(terminalFailure) || readCodexErrorMessage(error);
+       const errorContent = !installed
+         ? 'Codex CLI is not configured. Please set up authentication first.'
+-        : error.message;
++        : failureMessage;
+ 
+       sendMessage(ws, createNormalizedMessage({ kind: 'error', content: errorContent, sessionId: currentSessionId, provider: 'codex' }));
+       if (!terminalFailure) {

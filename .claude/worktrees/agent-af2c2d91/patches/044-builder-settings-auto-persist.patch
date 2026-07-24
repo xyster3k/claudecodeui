@@ -1,0 +1,17 @@
+diff --git a/src/components/settings/hooks/useSettingsController.ts b/src/components/settings/hooks/useSettingsController.ts
+index cc96f46..d8e36f6 100644
+--- a/src/components/settings/hooks/useSettingsController.ts
++++ b/src/components/settings/hooks/useSettingsController.ts
+@@ -164,6 +164,12 @@ export function useSettingsController({ isOpen, initialTab }: UseSettingsControl
+   const [geminiPermissionMode, setGeminiPermissionMode] = useState<GeminiPermissionMode>('default');
+   const [builderSettings, setBuilderSettings] = useState<BuilderSettingsState>(() => createDefaultBuilderSettings());
+ 
++  // Auto-persist builder settings so the build pipeline always picks up the
++  // latest values, even if the user has not clicked Save Settings yet.
++  useEffect(() => {
++    localStorage.setItem('builder-settings', JSON.stringify(builderSettings));
++  }, [builderSettings]);
++
+   const [showLoginModal, setShowLoginModal] = useState(false);
+   const [loginProvider, setLoginProvider] = useState<ActiveLoginProvider>('');
+   const {

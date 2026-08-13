@@ -20,5 +20,29 @@
 +    { value: "sonnet[1m]", label: "Sonnet 4.6 [1M]" },
 +    { value: "opus[1m]", label: "Opus 4.8 [1M]" },
    ],
-
+ 
    DEFAULT: "opus",
+
+--- a/server/claude-sdk.js
++++ b/server/claude-sdk.js
+@@ -204,7 +204,7 @@
+   sdkOptions.disallowedTools = settings.disallowedTools || [];
+ 
+   // Map model (default to sonnet)
+-  // Valid models: sonnet, opus, haiku, opusplan, sonnet[1m]
++  // Valid models: fable, opus (4.8), sonnet (4.6), haiku (4.5), opusplan, sonnet[1m], opus[1m], claude-opus-4-8
+   sdkOptions.model = options.model || CLAUDE_MODELS.DEFAULT;
+   // Model logged at query start below
+ 
+
+--- a/server/routes/agent.js
++++ b/server/routes/agent.js
+@@ -643,7 +643,7 @@
+  *
+  * @param {string} model - (Optional) Model identifier for providers.
+  *
+- *                        Claude models: 'sonnet' (default), 'opus', 'haiku', 'opusplan', 'sonnet[1m]'
++ *                        Claude models: 'opus' (default/4.8), 'fable', 'sonnet' (4.6), 'haiku' (4.5), 'opusplan', 'sonnet[1m]', 'opus[1m]', 'claude-opus-4-8'
+  *                        Cursor models: 'gpt-5' (default), 'gpt-5.2', 'gpt-5.2-high', 'sonnet-4.5', 'opus-4.5',
+  *                                       'gemini-3-pro', 'composer-1', 'auto', 'gpt-5.1', 'gpt-5.1-high',
+  *                                       'gpt-5.1-codex', 'gpt-5.1-codex-high', 'gpt-5.1-codex-max',

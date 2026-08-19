@@ -1,0 +1,153 @@
+name: Deploy CloudCLI
+
+# This repo is a patch stack, not an app: the image is built from upstream at a pinned
+# commit with patches/*.patch applied on top. So the deploy gate is "does the stack still
+# apply and build" — a conflicting patch fails here instead of on the server.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time, and never cancel one that is already rebuilding or restarting
+# containers on the box.
+concurrency:
+  group: cloudcli-deploy
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Patch stack applies and builds
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out patch repo
+        uses: actions/checkout@v4
+        with:
+          path: patchrepo
+
+      - name: Resolve pinned upstream commit
+        id: upstream
+        run: |
+          set -euo pipefail
+          commit="$(sed -n 's/^ARG UPSTREAM_COMMIT=\([0-9a-f]\{7,40\}\).*/\1/p' patchrepo/Dockerfile | head -1)"
+          if [ -z "$commit" ]; then
+            echo "::error::Could not read ARG UPSTREAM_COMMIT from Dockerfile"
+            exit 1
+          fi
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "Pinned upstream commit: $commit"
+
+      - name: Clone upstream at pinned commit
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/siteboon/claudecodeui.git upstream
+          git -C upstream checkout --quiet "${{ steps.upstream.outputs.commit }}"
+
+      - name: Apply patch stack
+        run: |
+          set -euo pipefail
+          cd upstream
+          count=0
+          for patch in ../patchrepo/patches/*.patch; do
+            [ -f "$patch" ] || continue
+            echo "applying $(basename "$patch")"
+            git apply --index "$patch"
+            count=$((count + 1))
+          done
+          echo "Applied $count patches cleanly."
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: upstream/package-lock.json
+
+      - name: Install dependencies
+        working-directory: upstream
+        # Matches the Dockerfile, which runs npm install rather than npm ci.
+        run: npm install --no-audit --no-fund
+
+      - name: Build client and server
+        working-directory: upstream
+        run: npm run build
+
+  deploy:
+    name: Deploy to production
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure SSH
+        env:
+          # Passed through the environment rather than interpolated into the script body,
+          # so nothing secret is ever pasted into a shell command line.
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Pull, rebuild, restart
+        env:
+          SHA: ${{ github.sha }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" bash -s -- "$SHA" <<'REMOTE'
+          set -euo pipefail
+          sha="$1"
+          cd /srv/stack
+
+          git -C claudecodeui fetch --quiet origin main
+
+          # Fast-forward only: a server whose checkout has drifted fails loudly here
+          # rather than having local changes silently clobbered.
+          git -C claudecodeui merge --ff-only "$sha"
+
+          actual="$(git -C claudecodeui rev-parse HEAD)"
+          if [ "$actual" != "$sha" ]; then
+            echo "Server is at $actual but this deploy is for $sha" >&2
+            exit 1
+          fi
+          echo "Server checkout now at $sha"
+
+          # A rebuild is mandatory: new patches add files the running image does not have.
+          docker compose build claudecodeui
+          docker compose up -d --force-recreate claudecodeui
+          REMOTE
+
+      - name: Health check
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" bash -s <<'REMOTE'
+          set -euo pipefail
+          cd /srv/stack
+
+          # Port 3001 is only reachable on the compose network, so the probe runs inside
+          # the container. Any HTTP status proves the server is listening; the endpoint
+          # sits behind auth middleware, so a 401 is a pass, not a failure.
+          for attempt in $(seq 1 30); do
+            code="$(docker compose exec -T claudecodeui \
+              curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3001/api/auth/status 2>/dev/null || true)"
+            if [ -n "$code" ] && [ "$code" != "000" ]; then
+              echo "App is responding (HTTP $code) after ${attempt} attempt(s)."
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "App did not respond within 60s — recent logs:" >&2
+          docker compose logs --tail=50 claudecodeui >&2
+          exit 1
+          REMOTE

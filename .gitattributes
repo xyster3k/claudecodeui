@@ -1,0 +1,4 @@
+# Patch files are applied verbatim by `git apply` in the Docker build and in CI, both on
+# Linux. A CRLF copy committed from a Windows checkout fails to match LF source context
+# and breaks the build, so keep them byte-exact and never line-ending converted.
+*.patch -text

@@ -154,6 +154,7 @@ Every user-visible patch should be listed here when added. Keep this table curre
 | `037-submit-dedup-guard.patch` | Submit dedup guard | Prevents accidental duplicate message submissions. |
 | `038-custom-build-branding.patch` | Custom build branding | Sidebar, browser title, footer version, Settings/About, issue links, and GitHub star links identify this as `CloudCLI Custom p038 by xyster3k`. |
 | `075-openai-gpt-5.6-models.patch` | OpenAI GPT-5.6 models | Adds GPT-5.6 Sol/Terra/Luna to the OpenAI (Codex) model picker; Codex default is now `gpt-5.6-sol`, and Builder Codex roles default to Sol (planner/integrator/QA) and Terra (worker). |
+| `076-codex-inline-media-extraction.patch` | Inline media extraction | Stops a session from freezing the UI when a model captures a screenshot. Codex `tools.view_image()` results arrive as multi-megabyte base64 data URIs inlined in the tool output; they are now written once to a content-addressed cache (`~/.cloudcli/media`, served by `GET /api/media/:file`) and replaced by a marker the chat view renders as a real image. Any single tool output over 256 KB is likewise stashed, with a "Load full output" action that appends the exact remainder — nothing is truncated away. |
 
 ## Adding A Feature
 

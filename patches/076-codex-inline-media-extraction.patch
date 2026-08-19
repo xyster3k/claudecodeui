@@ -1,0 +1,672 @@
+diff --git a/server/index.js b/server/index.js
+index bf27818..30050f6 100755
+--- a/server/index.js
++++ b/server/index.js
+@@ -70,6 +70,7 @@ import userRoutes from './routes/user.js';
+ import geminiRoutes from './routes/gemini.js';
+ import giteaRoutes from './routes/gitea.js';
+ import pluginsRoutes from './routes/plugins.js';
++import mediaRoutes from './routes/media.js';
+ import providerRoutes from './modules/providers/provider.routes.js';
+ import { startEnabledPluginServers, stopAllPlugins, getPluginPort } from './utils/plugin-process-manager.js';
+ import { initializeDatabase, projectsDb } from './modules/database/index.js';
+@@ -200,6 +201,9 @@ app.use('/api/gitea', authenticateToken, giteaRoutes);
+ // Plugins API Routes (protected)
+ app.use('/api/plugins', authenticateToken, pluginsRoutes);
+ 
++// Oversized tool-output payloads extracted from session history (protected)
++app.use('/api/media', authenticateToken, mediaRoutes);
++
+ // Unified provider MCP routes (protected)
+ app.use('/api/providers', authenticateToken, providerRoutes);
+ 
+diff --git a/server/modules/providers/list/codex/codex-sessions.provider.ts b/server/modules/providers/list/codex/codex-sessions.provider.ts
+index a7fe812..faadcf8 100644
+--- a/server/modules/providers/list/codex/codex-sessions.provider.ts
++++ b/server/modules/providers/list/codex/codex-sessions.provider.ts
+@@ -5,6 +5,7 @@ import { sessionsDb } from '@/modules/database/index.js';
+ import type { IProviderSessions } from '@/shared/interfaces.js';
+ import type { AnyRecord, FetchHistoryOptions, FetchHistoryResult, NormalizedMessage } from '@/shared/types.js';
+ import { createNormalizedMessage, generateMessageId, readObjectRecord } from '@/shared/utils.js';
++import { sanitizeToolOutput } from '@/utils/inline-media.js';
+ 
+ const PROVIDER = 'codex';
+ 
+@@ -173,7 +174,7 @@ async function getCodexSessionMessages(
+             type: 'tool_result',
+             timestamp: entry.timestamp,
+             toolCallId: entry.payload.call_id,
+-            output: entry.payload.output,
++            output: sanitizeToolOutput(entry.payload.output),
+           });
+         }
+ 
+@@ -212,7 +213,7 @@ async function getCodexSessionMessages(
+               type: 'tool_use',
+               timestamp: entry.timestamp,
+               toolName,
+-              toolInput: input,
++              toolInput: sanitizeToolOutput(input),
+               toolCallId: entry.payload.call_id,
+             });
+           }
+@@ -223,7 +224,7 @@ async function getCodexSessionMessages(
+             type: 'tool_result',
+             timestamp: entry.timestamp,
+             toolCallId: entry.payload.call_id,
+-            output: entry.payload.output || '',
++            output: sanitizeToolOutput(entry.payload.output),
+           });
+         }
+       } catch {
+diff --git a/server/openai-codex.js b/server/openai-codex.js
+index 37063b2..7bf22f2 100644
+--- a/server/openai-codex.js
++++ b/server/openai-codex.js
+@@ -18,6 +18,7 @@ import { notifyRunFailed, notifyRunStopped } from './services/notification-orche
+ import { sessionsService } from './modules/providers/services/sessions.service.js';
+ import { providerAuthService } from './modules/providers/services/provider-auth.service.js';
+ import { createNormalizedMessage } from './shared/utils.js';
++import { sanitizeToolOutput } from './utils/inline-media.js';
+ 
+ // Track active sessions
+ const activeCodexSessions = new Map();
+@@ -103,7 +104,9 @@ function transformCodexEvent(event) {
+             type: 'item',
+             itemType: 'command_execution',
+             command: item.command,
+-            output: item.aggregated_output,
++            // A `tools.view_image()` call comes back as a multi-megabyte base64 data URI.
++            // Extract it to the media cache before it reaches the socket.
++            output: sanitizeToolOutput(item.aggregated_output),
+             exitCode: item.exit_code,
+             status: item.status
+           };
+diff --git a/server/routes/media.js b/server/routes/media.js
+new file mode 100644
+index 0000000..ca2c922
+--- /dev/null
++++ b/server/routes/media.js
+@@ -0,0 +1,39 @@
++import express from 'express';
++import fs from 'node:fs';
++
++import { resolveMediaPath, mediaContentType } from '../utils/inline-media.js';
++
++const router = express.Router();
++
++/**
++ * Serves a payload that was too large to inline in a tool result — a screenshot the
++ * model captured, or the full text of a very long output. File names are content
++ * addressed (sha256), so the response is immutable and safe to cache hard.
++ */
++router.get('/:file', (req, res) => {
++  const absolutePath = resolveMediaPath(req.params.file);
++
++  if (!absolutePath) {
++    return res.status(400).json({ error: 'Invalid media reference' });
++  }
++
++  if (!fs.existsSync(absolutePath)) {
++    return res.status(404).json({ error: 'Media no longer cached' });
++  }
++
++  res.setHeader('Content-Type', mediaContentType(req.params.file));
++  res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
++
++  const stream = fs.createReadStream(absolutePath);
++  stream.on('error', () => {
++    if (!res.headersSent) {
++      res.status(500).json({ error: 'Failed to read media' });
++    } else {
++      res.end();
++    }
++  });
++
++  return stream.pipe(res);
++});
++
++export default router;
+diff --git a/server/utils/inline-media.ts b/server/utils/inline-media.ts
+new file mode 100644
+index 0000000..4166427
+--- /dev/null
++++ b/server/utils/inline-media.ts
+@@ -0,0 +1,243 @@
++import crypto from 'node:crypto';
++import fs from 'node:fs';
++import os from 'node:os';
++import path from 'node:path';
++
++/**
++ * Oversized payload extraction for provider tool output.
++ *
++ * Codex 5.6-era models can call `tools.view_image()` from inside an `exec` tool, and
++ * the CLI writes the result back as a base64 data URI embedded in the tool output.
++ * A single screenshot lands as a ~3 MB string on one JSONL line; forwarding that
++ * verbatim turned a session fetch into a ~6 MB JSON response and froze the chat view.
++ *
++ * Nothing is discarded here. Anything too large to inline is written once to a
++ * content-addressed cache and replaced by a short marker that the frontend expands on
++ * demand, so the full image and the full text stay exactly one request away.
++ */
++
++const MEDIA_DIR = path.join(os.homedir(), '.cloudcli', 'media');
++
++/** Any single tool output longer than this is stashed and shown with a "load full" action. */
++export const MAX_INLINE_TEXT_BYTES = 256 * 1024;
++
++/** Total cache budget; the least recently referenced files are dropped past it. */
++const MAX_STORE_BYTES = 512 * 1024 * 1024;
++const PRUNE_INTERVAL_MS = 10 * 60 * 1000;
++
++/** sha256 hex + short extension. Also the allow-list for what the media route may serve. */
++const MEDIA_FILE_PATTERN = /^[0-9a-f]{64}\.[a-z0-9]{1,8}$/;
++
++const INLINE_IMAGE_PATTERN = /data:image\/([a-z0-9.+-]+);base64,([A-Za-z0-9+/]+={0,2})/gi;
++
++const EXTENSION_BY_MIME: Record<string, string> = {
++  'image/png': 'png',
++  'image/jpeg': 'jpg',
++  'image/jpg': 'jpg',
++  'image/gif': 'gif',
++  'image/webp': 'webp',
++  'image/bmp': 'bmp',
++  'image/avif': 'avif',
++  'image/svg+xml': 'svg',
++};
++
++const CONTENT_TYPE_BY_EXTENSION: Record<string, string> = {
++  png: 'image/png',
++  jpg: 'image/jpeg',
++  gif: 'image/gif',
++  webp: 'image/webp',
++  bmp: 'image/bmp',
++  avif: 'image/avif',
++  svg: 'image/svg+xml',
++  txt: 'text/plain; charset=utf-8',
++};
++
++let lastPruneAt = 0;
++
++function formatBytes(bytes: number): string {
++  if (bytes < 1024) return `${bytes} B`;
++  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
++  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
++}
++
++function pruneStore(): void {
++  const now = Date.now();
++  if (now - lastPruneAt < PRUNE_INTERVAL_MS) return;
++  lastPruneAt = now;
++
++  try {
++    const entries = fs
++      .readdirSync(MEDIA_DIR)
++      .filter((name) => MEDIA_FILE_PATTERN.test(name))
++      .map((name) => {
++        const stats = fs.statSync(path.join(MEDIA_DIR, name));
++        return { name, size: stats.size, mtimeMs: stats.mtimeMs };
++      });
++
++    let total = entries.reduce((sum, entry) => sum + entry.size, 0);
++    if (total <= MAX_STORE_BYTES) return;
++
++    entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
++
++    for (const entry of entries) {
++      if (total <= MAX_STORE_BYTES) break;
++      fs.rmSync(path.join(MEDIA_DIR, entry.name), { force: true });
++      total -= entry.size;
++    }
++  } catch {
++    // A cache that cannot be pruned is not worth failing a session read over.
++  }
++}
++
++/**
++ * Writes a payload to the content-addressed cache and returns the URL that serves it,
++ * or null when the cache is unavailable.
++ */
++function stash(buffer: Buffer, extension: string): string | null {
++  try {
++    fs.mkdirSync(MEDIA_DIR, { recursive: true });
++
++    const hash = crypto.createHash('sha256').update(buffer).digest('hex');
++    const fileName = `${hash}.${extension}`;
++    const absolutePath = path.join(MEDIA_DIR, fileName);
++
++    if (fs.existsSync(absolutePath)) {
++      // Identical payloads reuse one file. Touch it so the pruner treats a
++      // re-referenced image as recently used rather than as the oldest entry.
++      const now = new Date();
++      fs.utimesSync(absolutePath, now, now);
++    } else {
++      fs.writeFileSync(absolutePath, buffer);
++      pruneStore();
++    }
++
++    return `/api/media/${fileName}`;
++  } catch {
++    return null;
++  }
++}
++
++/**
++ * Codex returns `exec` output as an array of content parts rather than a plain string.
++ * Flattening it to text and image URLs is what lets the image extraction below see the
++ * data URI at all — and it replaces the "[object Object]" the UI used to show for these
++ * results. Any unrecognised part type aborts the flattening so nothing is silently lost.
++ */
++function flattenContentParts(parts: unknown[]): string | null {
++  if (parts.length === 0) return null;
++
++  const chunks: string[] = [];
++
++  for (const part of parts) {
++    if (!part || typeof part !== 'object') return null;
++    const record = part as Record<string, unknown>;
++
++    if (record.type === 'input_text' || record.type === 'output_text' || record.type === 'text') {
++      chunks.push(typeof record.text === 'string' ? record.text : '');
++    } else if (record.type === 'input_image' || record.type === 'image') {
++      chunks.push(typeof record.image_url === 'string' ? record.image_url : '');
++    } else {
++      return null;
++    }
++  }
++
++  return chunks.join('\n');
++}
++
++/**
++ * Normalises whatever a provider put in an output field to text. The same field arrives
++ * as a plain string (shell output), as a content-part array (`exec`), and occasionally as
++ * a JSON string holding that array.
++ */
++function coerceToText(rawOutput: unknown): string {
++  if (typeof rawOutput === 'string') {
++    const trimmed = rawOutput.trim();
++
++    if (trimmed.startsWith('[') && trimmed.includes('data:image/')) {
++      try {
++        const parsed: unknown = JSON.parse(trimmed);
++        if (Array.isArray(parsed)) {
++          const flattened = flattenContentParts(parsed);
++          if (flattened !== null) return flattened;
++        }
++      } catch {
++        // Not the content-part shape — keep the original string.
++      }
++    }
++
++    return rawOutput;
++  }
++
++  if (rawOutput === null || rawOutput === undefined) return '';
++  if (Array.isArray(rawOutput)) return flattenContentParts(rawOutput) ?? JSON.stringify(rawOutput);
++  if (typeof rawOutput === 'object') return JSON.stringify(rawOutput);
++
++  return String(rawOutput);
++}
++
++/** Replaces every base64 image data URI with a marker pointing at the cached file. */
++export function extractInlineImages(text: string): string {
++  if (!text.includes('data:image/')) return text;
++
++  return text.replace(INLINE_IMAGE_PATTERN, (match, mimeSubtype: string, base64Data: string) => {
++    const mime = `image/${String(mimeSubtype).toLowerCase()}`;
++    const extension = EXTENSION_BY_MIME[mime];
++    if (!extension) return match;
++
++    const buffer = Buffer.from(base64Data, 'base64');
++    if (buffer.length === 0) return match;
++
++    const url = stash(buffer, extension);
++    if (!url) {
++      return `[image: ${formatBytes(buffer.length)} ${mime} — media cache unavailable]`;
++    }
++
++    return `[[cloudcli-media|image|${url}|${buffer.length}]]`;
++  });
++}
++
++/**
++ * Keeps the inlined portion of a very long output bounded, stashing the whole thing so
++ * the frontend can pull the remainder on demand. If the cache is unavailable the text is
++ * returned in full — losing content is never the better trade.
++ */
++export function capOversizedText(text: string): string {
++  const buffer = Buffer.from(text, 'utf8');
++  if (buffer.length <= MAX_INLINE_TEXT_BYTES) return text;
++
++  const url = stash(buffer, 'txt');
++  if (!url) return text;
++
++  // Decode the head on its own so a multi-byte character split by the byte slice is
++  // dropped rather than shown as a replacement character.
++  const head = buffer.subarray(0, MAX_INLINE_TEXT_BYTES).toString('utf8').replace(/\uFFFD+$/, '');
++  const shownBytes = Buffer.byteLength(head, 'utf8');
++
++  return `${head}\n[[cloudcli-media|overflow|${url}|${buffer.length}|${shownBytes}]]`;
++}
++
++/**
++ * Single entry point for provider tool output on both the history and the live path.
++ * Short, image-free output is returned untouched so ordinary results are unaffected.
++ */
++export function sanitizeToolOutput(rawOutput: unknown): string {
++  const text = coerceToText(rawOutput);
++  if (!text) return '';
++
++  if (!text.includes('data:image/') && Buffer.byteLength(text, 'utf8') <= MAX_INLINE_TEXT_BYTES) {
++    return text;
++  }
++
++  return capOversizedText(extractInlineImages(text));
++}
++
++/** Resolves a cache file name to an absolute path, or null when it is not a valid entry. */
++export function resolveMediaPath(fileName: string): string | null {
++  if (!MEDIA_FILE_PATTERN.test(fileName)) return null;
++  return path.join(MEDIA_DIR, fileName);
++}
++
++export function mediaContentType(fileName: string): string {
++  const extension = path.extname(fileName).slice(1).toLowerCase();
++  return CONTENT_TYPE_BY_EXTENSION[extension] || 'application/octet-stream';
++}
+diff --git a/src/components/chat/tools/components/ContentRenderers/InlineMedia.tsx b/src/components/chat/tools/components/ContentRenderers/InlineMedia.tsx
+new file mode 100644
+index 0000000..c107c81
+--- /dev/null
++++ b/src/components/chat/tools/components/ContentRenderers/InlineMedia.tsx
+@@ -0,0 +1,210 @@
++import React, { useEffect, useRef, useState } from 'react';
++import { authenticatedFetch } from '../../../../../utils/api';
++
++/**
++ * Renderers for payloads the server moved out of a tool result because they were too
++ * large to inline — a screenshot the model captured, or the tail of a very long output.
++ * Both fetch on demand, so a session loads instantly and the full content is still
++ * reachable in one click.
++ */
++
++const MARKER_PATTERN = /\[\[cloudcli-media\|(image|overflow)\|([^|\]]+)\|(\d+)(?:\|(\d+))?\]\]/g;
++
++export type InlineMediaSegment =
++  | { kind: 'text'; text: string }
++  | { kind: 'image'; url: string; bytes: number }
++  | { kind: 'overflow'; url: string; totalBytes: number; shownBytes: number };
++
++export function hasInlineMedia(content: string): boolean {
++  return content.includes('[[cloudcli-media|');
++}
++
++/** Splits raw content into plain text runs and the media references embedded in it. */
++export function splitInlineMedia(content: string): InlineMediaSegment[] {
++  const segments: InlineMediaSegment[] = [];
++  let lastIndex = 0;
++
++  MARKER_PATTERN.lastIndex = 0;
++  let match = MARKER_PATTERN.exec(content);
++
++  while (match !== null) {
++    if (match.index > lastIndex) {
++      segments.push({ kind: 'text', text: content.slice(lastIndex, match.index) });
++    }
++
++    if (match[1] === 'image') {
++      segments.push({ kind: 'image', url: match[2], bytes: Number(match[3]) });
++    } else {
++      segments.push({
++        kind: 'overflow',
++        url: match[2],
++        totalBytes: Number(match[3]),
++        shownBytes: Number(match[4] || 0),
++      });
++    }
++
++    lastIndex = match.index + match[0].length;
++    match = MARKER_PATTERN.exec(content);
++  }
++
++  if (lastIndex < content.length) {
++    segments.push({ kind: 'text', text: content.slice(lastIndex) });
++  }
++
++  return segments;
++}
++
++export function formatByteSize(bytes: number): string {
++  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
++  if (bytes < 1024) return `${bytes} B`;
++  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
++  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
++}
++
++interface InlineMediaImageProps {
++  url: string;
++  bytes: number;
++}
++
++export const InlineMediaImage: React.FC<InlineMediaImageProps> = ({ url, bytes }) => {
++  const [objectUrl, setObjectUrl] = useState<string | null>(null);
++  const [error, setError] = useState<string | null>(null);
++  const [loading, setLoading] = useState(false);
++
++  useEffect(() => {
++    const controller = new AbortController();
++    let createdUrl: string | null = null;
++
++    const load = async () => {
++      try {
++        setLoading(true);
++        setError(null);
++
++        const response = await authenticatedFetch(url, { signal: controller.signal });
++        if (!response.ok) {
++          throw new Error(`Request failed with status ${response.status}`);
++        }
++
++        const blob = await response.blob();
++        createdUrl = URL.createObjectURL(blob);
++        setObjectUrl(createdUrl);
++      } catch (loadError: unknown) {
++        if (loadError instanceof Error && loadError.name === 'AbortError') return;
++        setError(loadError instanceof Error ? loadError.message : 'Unable to load image');
++      } finally {
++        setLoading(false);
++      }
++    };
++
++    load();
++
++    return () => {
++      controller.abort();
++      if (createdUrl) URL.revokeObjectURL(createdUrl);
++    };
++  }, [url]);
++
++  if (error) {
++    return (
++      <div className="my-1 rounded border border-amber-300/60 bg-amber-50 px-2 py-1.5 text-xs text-amber-800 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-200">
++        Image ({formatByteSize(bytes)}) could not be loaded: {error}
++      </div>
++    );
++  }
++
++  if (loading || !objectUrl) {
++    return (
++      <div className="my-1 text-xs text-gray-500 dark:text-gray-400">
++        Loading image ({formatByteSize(bytes)})…
++      </div>
++    );
++  }
++
++  return (
++    <figure className="my-1">
++      <a href={objectUrl} target="_blank" rel="noreferrer">
++        <img
++          src={objectUrl}
++          alt={`Tool output image (${formatByteSize(bytes)})`}
++          className="max-h-96 max-w-full rounded border border-gray-200 object-contain dark:border-gray-700"
++        />
++      </a>
++      <figcaption className="mt-0.5 text-[11px] text-gray-500 dark:text-gray-400">
++        Image · {formatByteSize(bytes)} · click to open full size
++      </figcaption>
++    </figure>
++  );
++};
++
++interface InlineMediaOverflowProps {
++  url: string;
++  totalBytes: number;
++  shownBytes: number;
++}
++
++export const InlineMediaOverflow: React.FC<InlineMediaOverflowProps> = ({
++  url,
++  totalBytes,
++  shownBytes,
++}) => {
++  const [remainder, setRemainder] = useState<string | null>(null);
++  const [error, setError] = useState<string | null>(null);
++  const [loading, setLoading] = useState(false);
++  const mountedRef = useRef(true);
++
++  useEffect(() => {
++    mountedRef.current = true;
++    return () => {
++      mountedRef.current = false;
++    };
++  }, []);
++
++  const loadFull = async () => {
++    try {
++      setLoading(true);
++      setError(null);
++
++      const response = await authenticatedFetch(url);
++      if (!response.ok) {
++        throw new Error(`Request failed with status ${response.status}`);
++      }
++
++      // The head is already on screen above this marker, and shownBytes counts UTF-8
++      // bytes, so slicing the raw buffer at that offset appends exactly the remainder.
++      const buffer = await response.arrayBuffer();
++      const offset = Math.min(shownBytes, buffer.byteLength);
++      const tail = new TextDecoder().decode(new Uint8Array(buffer, offset));
++
++      if (mountedRef.current) setRemainder(tail);
++    } catch (loadError: unknown) {
++      if (mountedRef.current) {
++        setError(loadError instanceof Error ? loadError.message : 'Unable to load full output');
++      }
++    } finally {
++      if (mountedRef.current) setLoading(false);
++    }
++  };
++
++  if (remainder !== null) {
++    return <span className="whitespace-pre-wrap break-words">{remainder}</span>;
++  }
++
++  const remainingBytes = Math.max(0, totalBytes - shownBytes);
++
++  return (
++    <div className="my-1 rounded border border-blue-300/60 bg-blue-50 px-2 py-1.5 text-xs text-blue-800 dark:border-blue-700/60 dark:bg-blue-950/40 dark:text-blue-200">
++      <span>
++        Output continues — {formatByteSize(remainingBytes)} of {formatByteSize(totalBytes)} not shown.
++      </span>{' '}
++      <button
++        type="button"
++        onClick={loadFull}
++        disabled={loading}
++        className="font-medium underline underline-offset-2 disabled:opacity-60"
++      >
++        {loading ? 'Loading…' : 'Load full output'}
++      </button>
++      {error && <div className="mt-1 text-amber-700 dark:text-amber-300">{error}</div>}
++    </div>
++  );
++};
+diff --git a/src/components/chat/tools/components/ContentRenderers/TextContent.tsx b/src/components/chat/tools/components/ContentRenderers/TextContent.tsx
+index abe3367..64f349a 100644
+--- a/src/components/chat/tools/components/ContentRenderers/TextContent.tsx
++++ b/src/components/chat/tools/components/ContentRenderers/TextContent.tsx
+@@ -1,4 +1,10 @@
+ import React from 'react';
++import {
++  hasInlineMedia,
++  splitInlineMedia,
++  InlineMediaImage,
++  InlineMediaOverflow,
++} from './InlineMedia';
+ 
+ interface TextContentProps {
+   content: string;
+@@ -6,6 +12,34 @@ interface TextContentProps {
+   className?: string;
+ }
+ 
++/**
++ * Expands the markers the server leaves behind when it moves an oversized payload —
++ * a captured screenshot, or the tail of a very long output — out of a tool result.
++ * Content without markers is rendered exactly as before.
++ */
++const renderInlineMedia = (content: string): React.ReactNode => {
++  if (!hasInlineMedia(content)) return content;
++
++  return splitInlineMedia(content).map((segment, index) => {
++    if (segment.kind === 'image') {
++      return <InlineMediaImage key={index} url={segment.url} bytes={segment.bytes} />;
++    }
++
++    if (segment.kind === 'overflow') {
++      return (
++        <InlineMediaOverflow
++          key={index}
++          url={segment.url}
++          totalBytes={segment.totalBytes}
++          shownBytes={segment.shownBytes}
++        />
++      );
++    }
++
++    return <React.Fragment key={index}>{segment.text}</React.Fragment>;
++  });
++};
++
+ /**
+  * Renders plain text, JSON, or code content
+  * Used by: Raw parameters, generic text results, JSON responses
+@@ -35,7 +69,7 @@ export const TextContent: React.FC<TextContentProps> = ({
+   if (format === 'code') {
+     return (
+       <pre className={`mt-1 overflow-hidden whitespace-pre-wrap break-words rounded border border-gray-200/50 bg-gray-50 p-2 font-mono text-xs text-gray-700 dark:border-gray-700/50 dark:bg-gray-800/50 dark:text-gray-300 ${className}`}>
+-        {content}
++        {renderInlineMedia(content)}
+       </pre>
+     );
+   }
+@@ -43,7 +77,7 @@ export const TextContent: React.FC<TextContentProps> = ({
+   // Plain text
+   return (
+     <div className={`mt-1 whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-300 ${className}`}>
+-      {content}
++      {renderInlineMedia(content)}
+     </div>
+   );
+ };
+diff --git a/src/components/chat/tools/components/ContentRenderers/index.ts b/src/components/chat/tools/components/ContentRenderers/index.ts
+index 6cac32e..3584435 100644
+--- a/src/components/chat/tools/components/ContentRenderers/index.ts
++++ b/src/components/chat/tools/components/ContentRenderers/index.ts
+@@ -3,4 +3,5 @@ export { FileListContent } from './FileListContent';
+ export { TodoListContent } from './TodoListContent';
+ export { TaskListContent } from './TaskListContent';
+ export { TextContent } from './TextContent';
++export { InlineMediaImage, InlineMediaOverflow, hasInlineMedia, splitInlineMedia } from './InlineMedia';
+ export { QuestionAnswerContent } from './QuestionAnswerContent';

@@ -39,6 +39,25 @@ To bump upstream:
 4. Rebuild and smoke-test the image.
 5. Update this README with any behavior changes.
 
+## Pinned Codex CLI
+
+`CODEX_CLI_VERSION` is defined in `Dockerfile` (currently `0.154.0`) and pins the globally
+installed `@openai/codex` binary in the runtime image.
+
+This matters because **the Codex CLI decides which models the API will serve**: the cached
+`~/.codex/models_cache.json` is fetched keyed by `client_version`, so an old CLI simply never
+sees newer models. Adding a model to `shared/modelConstants.js` only changes the dropdown — if
+the CLI is too old, selecting it fails at runtime. `gpt-6-astra` needs CLI `>= 0.153.1`.
+
+It is pinned rather than floating because an unpinned `npm install -g` sits in a Docker layer
+that stays cached across rebuilds, so the CLI silently stayed old while the UI advertised new
+models. Bump the pin whenever adopting a model that needs a newer CLI, and verify with:
+
+```bash
+docker exec claudecodeui codex --version
+docker exec claudecodeui node -e "console.log(JSON.parse(require('fs').readFileSync('/home/node/.codex/models_cache.json','utf8')).models.map(m=>m.id))"
+```
+
 ## User Guide
 
 Use CloudCLI as the web UI for coding-agent sessions across Claude, Codex, Gemini, and Cursor-backed workflows. The custom build adds operational features for multi-project work, builder orchestration, safer run control, voice input, and per-project GitHub credentials.
@@ -155,6 +174,7 @@ Every user-visible patch should be listed here when added. Keep this table curre
 | `038-custom-build-branding.patch` | Custom build branding | Sidebar, browser title, footer version, Settings/About, issue links, and GitHub star links identify this as `CloudCLI Custom p038 by xyster3k`. |
 | `075-openai-gpt-5.6-models.patch` | OpenAI GPT-5.6 models | Adds GPT-5.6 Sol/Terra/Luna to the OpenAI (Codex) model picker; Codex default is now `gpt-5.6-sol`, and Builder Codex roles default to Sol (planner/integrator/QA) and Terra (worker). |
 | `076-codex-inline-media-extraction.patch` | Inline media extraction | Stops a session from freezing the UI when a model captures a screenshot. Codex `tools.view_image()` results arrive as multi-megabyte base64 data URIs inlined in the tool output; they are now written once to a content-addressed cache (`~/.cloudcli/media`, served by `GET /api/media/:file`) and replaced by a marker the chat view renders as a real image. Any single tool output over 256 KB is likewise stashed, with a "Load full output" action that appends the exact remainder — nothing is truncated away. |
+| `077-openai-gpt-6-astra.patch` | OpenAI GPT-6 Astra | Adds GPT-6 Astra, OpenAI's frontier flagship (successor to GPT-5.6 Sol), to the top of the OpenAI (Codex) model picker. Codex default is now `gpt-6-astra`, and Builder Codex roles default to Astra (planner/integrator/QA) with Terra kept as the worker for cost. Sol/Terra/Luna and the older models all remain selectable. Requires Codex CLI >= 0.153.1 — see `CODEX_CLI_VERSION` in `Dockerfile`. |
 
 ## Adding A Feature
 

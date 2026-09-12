@@ -1,0 +1,48 @@
+diff --git a/server/builder-mode.js b/server/builder-mode.js
+index fe92cbad..759a944c 100644
+--- a/server/builder-mode.js
++++ b/server/builder-mode.js
+@@ -409,7 +409,7 @@ const createBuilderTaskRuntimeState = (task) => ({
+ 
+ const defaultPlannerModelForProvider = (provider, fallback) => {
+   if (fallback && (!providerForModel(fallback) || providerForModel(fallback) === provider)) return fallback;
+-  if (provider === 'codex') return 'gpt-5.6-sol';
++  if (provider === 'codex') return 'gpt-6-astra';
+   if (provider === 'claude') return 'opus';
+   return null;
+ };
+@@ -914,9 +914,9 @@ const persistRunArtifacts = async (projectPath, sessionId, requestMarkdown, prdM
+     orchestration: {
+       maxParallelWorkers: 2,
+       maxWorkers: 6,
+-      plannerModel: 'gpt-5.6-sol',
++      plannerModel: 'gpt-6-astra',
+       workerModel: 'gpt-5.6-terra',
+-      integratorModel: 'gpt-5.6-sol',
++      integratorModel: 'gpt-6-astra',
+     },
+     approvals: {
+       riskyChanges: false,
+diff --git a/shared/modelConstants.js b/shared/modelConstants.js
+index 7dc3407a..9710ee33 100644
+--- a/shared/modelConstants.js
++++ b/shared/modelConstants.js
+@@ -63,7 +63,8 @@ export const CURSOR_MODELS = {
+  */
+ export const CODEX_MODELS = {
+   OPTIONS: [
+-    { value: "gpt-5.6-sol", label: "GPT-5.6 Sol · Flagship, best for coding" },
++    { value: "gpt-6-astra", label: "GPT-6 Astra · Frontier flagship, best for coding" },
++    { value: "gpt-5.6-sol", label: "GPT-5.6 Sol · Previous flagship" },
+     { value: "gpt-5.6-terra", label: "GPT-5.6 Terra · Balanced, ~5.5 quality at half the cost" },
+     { value: "gpt-5.6-luna", label: "GPT-5.6 Luna · Fastest, most affordable" },
+     { value: "gpt-5.5", label: "GPT-5.5" },
+@@ -77,7 +78,7 @@ export const CODEX_MODELS = {
+     { value: "o4-mini", label: "O4-mini" },
+   ],
+ 
+-  DEFAULT: "gpt-5.6-sol",
++  DEFAULT: "gpt-6-astra",
+ };
+ 
+ /**

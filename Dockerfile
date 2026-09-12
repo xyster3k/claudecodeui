@@ -44,10 +44,15 @@ RUN apt-get update \
       python3 sqlite3 \
  && rm -rf /var/lib/apt/lists/*
 
-# Coding CLIs available inside the container
+# Coding CLIs available inside the container.
+# @openai/codex is pinned: the CLI gates which models the API will serve (the cached
+# models_cache.json is keyed by client_version), and gpt-6-astra needs >= 0.153.1.
+# Leaving it unpinned meant this layer stayed cached and silently kept an old CLI, so a
+# model added to the UI dropdown would fail at runtime. Bump this when adopting new models.
+ARG CODEX_CLI_VERSION=0.154.0
 RUN npm install -g --omit=dev \
       @anthropic-ai/claude-code \
-      @openai/codex \
+      "@openai/codex@${CODEX_CLI_VERSION}" \
       task-master-ai
 
 # Git credential helper: reads active PAT from CloudCLI's SQLite DB.

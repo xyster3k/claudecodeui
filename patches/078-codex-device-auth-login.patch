@@ -1,0 +1,36 @@
+diff --git a/server/modules/websocket/services/shell-websocket.service.ts b/server/modules/websocket/services/shell-websocket.service.ts
+index 9bf7046b..6cc877ea 100644
+--- a/server/modules/websocket/services/shell-websocket.service.ts
++++ b/server/modules/websocket/services/shell-websocket.service.ts
+@@ -185,6 +185,7 @@ export function handleShellConnection(
+           !!initialCommand &&
+           (initialCommand.includes('setup-token') ||
+             initialCommand.includes('cursor-agent login') ||
++            initialCommand.includes('codex login') ||
+             initialCommand.includes('auth login'));
+ 
+         const commandSuffix =
+diff --git a/src/components/provider-auth/view/ProviderLoginModal.tsx b/src/components/provider-auth/view/ProviderLoginModal.tsx
+index fa1d4407..a16d612d 100644
+--- a/src/components/provider-auth/view/ProviderLoginModal.tsx
++++ b/src/components/provider-auth/view/ProviderLoginModal.tsx
+@@ -1,6 +1,6 @@
+ import { ExternalLink, KeyRound, X } from 'lucide-react';
+ import StandaloneShell from '../../standalone-shell/view/StandaloneShell';
+-import { DEFAULT_PROJECT_FOR_EMPTY_SHELL, IS_PLATFORM } from '../../../constants/config';
++import { DEFAULT_PROJECT_FOR_EMPTY_SHELL } from '../../../constants/config';
+ import type { LLMProvider } from '../../../types/app';
+ 
+ type ProviderLoginModalProps = {
+@@ -34,7 +34,10 @@ const getProviderCommand = ({
+   }
+ 
+   if (provider === 'codex') {
+-    return IS_PLATFORM ? 'codex login --device-auth' : 'codex login';
++    // Always use device-code auth: the browser flow waits for a callback on
++    // localhost:1455 inside the server/container, which the user's browser
++    // can never reach on a remote deployment.
++    return 'codex login --device-auth';
+   }
+ 
+   return 'gemini status';

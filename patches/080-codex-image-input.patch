@@ -1,0 +1,100 @@
+diff --git a/server/openai-codex.js b/server/openai-codex.js
+index 7bf22f24..ce2a85cd 100644
+--- a/server/openai-codex.js
++++ b/server/openai-codex.js
+@@ -13,6 +13,9 @@
+  * - getActiveCodexSessions() - List all active sessions
+  */
+ 
++import { promises as fs } from 'fs';
++import os from 'os';
++import path from 'path';
+ import { Codex } from '@openai/codex-sdk';
+ import { notifyRunFailed, notifyRunStopped } from './services/notification-orchestrator.js';
+ import { sessionsService } from './modules/providers/services/sessions.service.js';
+@@ -216,6 +219,36 @@ function mapPermissionModeToCodexOptions(permissionMode) {
+   };
+ }
+ 
++/**
++ * Writes attached base64 images to a temp dir so they can be passed to Codex as
++ * local_image inputs (`codex exec --image`), which sends the pixels to the model.
++ * @param {Array} images - Image objects with `data` as a data URL
++ * @returns {Promise<{imagePaths: Array<string>, tempDir: string|null}>}
++ */
++async function saveCodexImages(images) {
++  const imagePaths = [];
++  if (!Array.isArray(images) || images.length === 0) {
++    return { imagePaths, tempDir: null };
++  }
++
++  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-images-'));
++  for (const [index, image] of images.entries()) {
++    const matches = typeof image?.data === 'string' ? image.data.match(/^data:([^;]+);base64,(.+)$/s) : null;
++    if (!matches) {
++      console.error('[Codex] Invalid image data format');
++      continue;
++    }
++
++    const [, mimeType, base64Data] = matches;
++    const extension = (mimeType.split('/')[1] || 'png').replace('jpeg', 'jpg').replace(/[^a-z0-9]/gi, '');
++    const filepath = path.join(tempDir, `image_${index}.${extension || 'png'}`);
++    await fs.writeFile(filepath, Buffer.from(base64Data, 'base64'));
++    imagePaths.push(filepath);
++  }
++
++  return { imagePaths, tempDir };
++}
++
+ /**
+  * Execute a Codex query with streaming
+  * @param {string} command - The prompt to send
+@@ -232,6 +265,7 @@ export async function queryCodex(command, options = {}, ws) {
+     permissionMode = 'default',
+     modelReasoningEffort,
+     reasoningEffort,
++    images,
+   } = options;
+ 
+   const workingDirectory = cwd || projectPath || process.cwd();
+@@ -242,6 +276,7 @@ export async function queryCodex(command, options = {}, ws) {
+   let thread;
+   let currentSessionId = sessionId;
+   let terminalFailure = null;
++  let imageTempDir = null;
+   const abortController = new AbortController();
+ 
+   try {
+@@ -282,8 +317,18 @@ export async function queryCodex(command, options = {}, ws) {
+     // Send session created event
+     sendMessage(ws, createNormalizedMessage({ kind: 'session_created', newSessionId: currentSessionId, sessionId: currentSessionId, provider: 'codex' }));
+ 
++    // Attached images go in as local_image inputs so the model actually sees them
++    const { imagePaths, tempDir } = await saveCodexImages(images);
++    imageTempDir = tempDir;
++    const input = imagePaths.length > 0
++      ? [
++          { type: 'text', text: command || '' },
++          ...imagePaths.map((imagePath) => ({ type: 'local_image', path: imagePath })),
++        ]
++      : command;
++
+     // Execute with streaming
+-    const streamedTurn = await thread.runStreamed(command, {
++    const streamedTurn = await thread.runStreamed(input, {
+       signal: abortController.signal
+     });
+ 
+@@ -373,6 +418,12 @@ export async function queryCodex(command, options = {}, ws) {
+         session.status = session.status === 'aborted' ? 'aborted' : 'completed';
+       }
+     }
++
++    if (imageTempDir) {
++      await fs.rm(imageTempDir, { recursive: true, force: true }).catch((err) =>
++        console.error(`[Codex] Failed to delete temp image dir ${imageTempDir}:`, err)
++      );
++    }
+   }
+ }
+ 

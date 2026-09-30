@@ -1,0 +1,207 @@
+diff --git a/src/components/chat/hooks/useChatComposerState.ts b/src/components/chat/hooks/useChatComposerState.ts
+index 91b16312..1b27d0fd 100644
+--- a/src/components/chat/hooks/useChatComposerState.ts
++++ b/src/components/chat/hooks/useChatComposerState.ts
+@@ -950,7 +950,14 @@ export function useChatComposerState({
+   }, []);
+ 
+   // Voice input
+-  const { isListening: isVoiceListening, isSupported: isVoiceSupported, startListening, stopListening } = useSpeechRecognition();
++  const {
++    isListening: isVoiceListening,
++    isSupported: isVoiceSupported,
++    startListening,
++    stopListening,
++    language: voiceLanguage,
++    cycleLanguage: cycleVoiceLanguage,
++  } = useSpeechRecognition();
+ 
+   const toggleVoiceInput = useCallback(() => {
+     if (isVoiceListening) {
+@@ -1063,6 +1070,8 @@ export function useChatComposerState({
+     isVoiceListening,
+     isVoiceSupported,
+     toggleVoiceInput,
++    voiceLanguage,
++    cycleVoiceLanguage,
+     handlePermissionDecision,
+     handleGrantToolPermission,
+     handleInputFocusChange,
+diff --git a/src/components/chat/hooks/useSpeechRecognition.ts b/src/components/chat/hooks/useSpeechRecognition.ts
+index 3afcaf9f..3da770af 100644
+--- a/src/components/chat/hooks/useSpeechRecognition.ts
++++ b/src/components/chat/hooks/useSpeechRecognition.ts
+@@ -33,8 +33,31 @@ function getSpeechRecognitionConstructor() {
+   return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+ }
+ 
++// Recognition languages offered by the voice button, cycled in this order.
++// The Web Speech API cannot auto-detect the spoken language, so one must be picked.
++export const VOICE_LANGUAGES = [
++  { code: 'en-US', label: 'EN' },
++  { code: 'ru-RU', label: 'RU' },
++] as const;
++
++const VOICE_LANGUAGE_STORAGE_KEY = 'voiceInputLanguage';
++
++function getInitialVoiceLanguage(): string {
++  try {
++    const stored = localStorage.getItem(VOICE_LANGUAGE_STORAGE_KEY);
++    if (stored && VOICE_LANGUAGES.some((l) => l.code === stored)) return stored;
++  } catch {
++    // storage unavailable
++  }
++  const browserLang = (typeof navigator !== 'undefined' && navigator.language) || '';
++  const match = VOICE_LANGUAGES.find((l) => browserLang.toLowerCase().startsWith(l.code.slice(0, 2)));
++  return match ? match.code : VOICE_LANGUAGES[0].code;
++}
++
+ export function useSpeechRecognition() {
+   const [isListening, setIsListening] = useState(false);
++  const [language, setLanguageState] = useState<string>(getInitialVoiceLanguage);
++  const languageRef = useRef(language);
+   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
+   const onResultRef = useRef<((text: string) => void) | null>(null);
+   const isSupported = typeof window !== 'undefined' && Boolean(getSpeechRecognitionConstructor());
+@@ -61,7 +84,7 @@ export function useSpeechRecognition() {
+       const recognition = new SpeechRecognitionCtor();
+       recognition.continuous = true;
+       recognition.interimResults = false;
+-      recognition.lang = navigator.language || 'en-US';
++      recognition.lang = languageRef.current;
+ 
+       onResultRef.current = onResult;
+ 
+@@ -106,6 +129,29 @@ export function useSpeechRecognition() {
+     [stopListening],
+   );
+ 
++  const setLanguage = useCallback(
++    (code: string) => {
++      languageRef.current = code;
++      setLanguageState(code);
++      try {
++        localStorage.setItem(VOICE_LANGUAGE_STORAGE_KEY, code);
++      } catch {
++        // storage unavailable
++      }
++      // Restart an active session so the new language takes effect immediately
++      const onResult = onResultRef.current;
++      if (recognitionRef.current && onResult) {
++        startListening(onResult);
++      }
++    },
++    [startListening],
++  );
++
++  const cycleLanguage = useCallback(() => {
++    const index = VOICE_LANGUAGES.findIndex((l) => l.code === languageRef.current);
++    setLanguage(VOICE_LANGUAGES[(index + 1) % VOICE_LANGUAGES.length].code);
++  }, [setLanguage]);
++
+   // Cleanup on unmount
+   useEffect(() => {
+     return () => {
+@@ -117,5 +163,5 @@ export function useSpeechRecognition() {
+     };
+   }, []);
+ 
+-  return { isListening, isSupported, startListening, stopListening };
++  return { isListening, isSupported, startListening, stopListening, language, cycleLanguage };
+ }
+diff --git a/src/components/chat/view/ChatInterface.tsx b/src/components/chat/view/ChatInterface.tsx
+index d4b7ff7d..beac9e38 100644
+--- a/src/components/chat/view/ChatInterface.tsx
++++ b/src/components/chat/view/ChatInterface.tsx
+@@ -173,6 +173,8 @@ function ChatInterface({
+     isVoiceListening,
+     isVoiceSupported,
+     toggleVoiceInput,
++    voiceLanguage,
++    cycleVoiceLanguage,
+     handlePermissionDecision,
+     handleGrantToolPermission,
+     handleInputFocusChange,
+@@ -480,6 +482,8 @@ function ChatInterface({
+           isVoiceListening={isVoiceListening}
+           isVoiceSupported={isVoiceSupported}
+           onVoiceToggle={toggleVoiceInput}
++          voiceLanguage={voiceLanguage}
++          onVoiceLanguageCycle={cycleVoiceLanguage}
+           provider={provider}
+           permissionMode={permissionMode}
+           onModeSwitch={cyclePermissionMode}
+diff --git a/src/components/chat/view/subcomponents/ChatComposer.tsx b/src/components/chat/view/subcomponents/ChatComposer.tsx
+index 77df9cb5..88b95ffa 100644
+--- a/src/components/chat/view/subcomponents/ChatComposer.tsx
++++ b/src/components/chat/view/subcomponents/ChatComposer.tsx
+@@ -14,6 +14,7 @@ import type {
+ import { ImageIcon, MicIcon, MessageSquareIcon, WrenchIcon, TestTube2Icon, XIcon, ArrowDownIcon } from 'lucide-react';
+ import type { PendingPermissionRequest, PermissionMode, Provider, WorkflowMode } from '../../types/types';
+ import CommandMenu from './CommandMenu';
++import { VOICE_LANGUAGES } from '../../hooks/useSpeechRecognition';
+ import ClaudeStatus from './ClaudeStatus';
+ import ImageAttachment from './ImageAttachment';
+ import PermissionRequestsBanner from './PermissionRequestsBanner';
+@@ -60,6 +61,8 @@ interface ChatComposerProps {
+   isVoiceListening: boolean;
+   isVoiceSupported: boolean;
+   onVoiceToggle: () => void;
++  voiceLanguage: string;
++  onVoiceLanguageCycle: () => void;
+   provider: Provider | string;
+   permissionMode: PermissionMode | string;
+   onModeSwitch: () => void;
+@@ -120,6 +123,8 @@ export default function ChatComposer({
+   isVoiceListening,
+   isVoiceSupported,
+   onVoiceToggle,
++  voiceLanguage,
++  onVoiceLanguageCycle,
+   provider,
+   permissionMode,
+   onModeSwitch,
+@@ -347,6 +352,17 @@ export default function ChatComposer({
+               </button>
+             )}
+ 
++            {isVoiceSupported && (
++              <button
++                type="button"
++                onClick={onVoiceLanguageCycle}
++                className="rounded-lg border border-border/60 bg-muted/50 px-2 py-1 text-xs font-semibold text-muted-foreground transition-all duration-200 hover:bg-muted"
++                title={t('input.voiceLanguage')}
++              >
++                {VOICE_LANGUAGES.find((l) => l.code === voiceLanguage)?.label ?? voiceLanguage}
++              </button>
++            )}
++
+             <button
+               type="button"
+               onClick={onWorkflowModeToggle}
+diff --git a/src/i18n/locales/en/chat.json b/src/i18n/locales/en/chat.json
+index d789c7c6..bc3fd267 100644
+--- a/src/i18n/locales/en/chat.json
++++ b/src/i18n/locales/en/chat.json
+@@ -137,6 +137,7 @@
+     "clickToChangeMode": "Click to change permission mode (or press Tab in input)",
+     "voiceInput": "Voice",
+     "voiceInputListening": "Listening...",
++    "voiceLanguage": "Voice input language (click to switch)",
+     "workflowModeToggle": "Toggle between normal chat and builder workflow mode",
+     "workflowModes": {
+       "chat": "Chat",
+diff --git a/src/i18n/locales/ru/chat.json b/src/i18n/locales/ru/chat.json
+index 4be43572..1f07fad2 100644
+--- a/src/i18n/locales/ru/chat.json
++++ b/src/i18n/locales/ru/chat.json
+@@ -133,6 +133,9 @@
+       "ctrlEnter": "Ctrl+Enter для отправки • Shift+Enter для новой строки • Tab для смены режима • / для команд",
+       "enter": "Enter для отправки • Shift+Enter для новой строки • Tab для смены режима • / для команд"
+     },
++    "voiceInput": "Голос",
++    "voiceInputListening": "Слушаю...",
++    "voiceLanguage": "Язык голосового ввода (нажмите для переключения)",
+     "clickToChangeMode": "Нажмите для смены режима разрешений (или нажмите Tab в поле ввода)",
+     "showAllCommands": "Показать все команды",
+     "clearInput": "Очистить ввод",

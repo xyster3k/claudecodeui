@@ -1,0 +1,238 @@
+diff --git a/server/index.js b/server/index.js
+index 30050f64..850cea3d 100755
+--- a/server/index.js
++++ b/server/index.js
+@@ -38,6 +38,7 @@ import {
+     abortCodexSession,
+     isCodexSessionActive,
+     getActiveCodexSessions,
++    reconnectCodexSessionWriter,
+ } from './openai-codex.js';
+ import {
+     spawnGemini,
+@@ -111,6 +112,7 @@ const wss = createWebSocketServer(server, {
+         isCodexSessionActive,
+         isGeminiSessionActive,
+         reconnectSessionWriter,
++        reconnectCodexSessionWriter,
+         getPendingApprovalsForSession,
+         getActiveClaudeSDKSessions,
+         getActiveCursorSessions,
+diff --git a/server/modules/websocket/services/chat-websocket.service.ts b/server/modules/websocket/services/chat-websocket.service.ts
+index 3a343888..c76e9d75 100644
+--- a/server/modules/websocket/services/chat-websocket.service.ts
++++ b/server/modules/websocket/services/chat-websocket.service.ts
+@@ -48,6 +48,7 @@ type ChatWebSocketDependencies = {
+   isCodexSessionActive: (sessionId: string) => boolean;
+   isGeminiSessionActive: (sessionId: string) => boolean;
+   reconnectSessionWriter: (sessionId: string, ws: WebSocket) => boolean;
++  reconnectCodexSessionWriter: (sessionId: string, ws: WebSocket) => boolean;
+   getPendingApprovalsForSession: (sessionId: string) => unknown[];
+   getActiveClaudeSDKSessions: () => unknown;
+   getActiveCursorSessions: () => unknown;
+@@ -317,6 +318,9 @@ export function handleChatConnection(
+           isActive = dependencies.isCursorSessionActive(sessionId);
+         } else if (provider === 'codex') {
+           isActive = dependencies.isCodexSessionActive(sessionId);
++          if (isActive) {
++            dependencies.reconnectCodexSessionWriter(sessionId, ws);
++          }
+         } else if (provider === 'gemini') {
+           isActive = dependencies.isGeminiSessionActive(sessionId);
+         } else {
+diff --git a/server/openai-codex.js b/server/openai-codex.js
+index ce2a85cd..f995f263 100644
+--- a/server/openai-codex.js
++++ b/server/openai-codex.js
+@@ -249,6 +249,30 @@ async function saveCodexImages(images) {
+   return { imagePaths, tempDir };
+ }
+ 
++/**
++ * Interrupts a turn that is still running in this thread and waits for its process to exit,
++ * so a new message can resume the same thread instead of racing a second `codex exec resume`.
++ * @param {string} sessionId - Codex thread ID
++ */
++async function interruptActiveCodexTurn(sessionId) {
++  const entry = activeCodexSessions.get(sessionId);
++  if (!entry) {
++    return;
++  }
++
++  // An already-stopped turn may still be exiting, so wait for it either way
++  if (entry.status === 'running') {
++    console.log(`[Codex] Interrupting running turn in ${sessionId} for a new message`);
++    entry.status = 'aborted';
++    try {
++      entry.abortController?.abort();
++    } catch (error) {
++      console.warn(`[Codex] Failed to interrupt session ${sessionId}:`, error);
++    }
++  }
++  await Promise.race([entry.done, new Promise((resolve) => setTimeout(resolve, 15000))]);
++}
++
+ /**
+  * Execute a Codex query with streaming
+  * @param {string} command - The prompt to send
+@@ -275,11 +299,19 @@ export async function queryCodex(command, options = {}, ws) {
+   let codex;
+   let thread;
+   let currentSessionId = sessionId;
++  let runEntry = null;
+   let terminalFailure = null;
+   let imageTempDir = null;
++  let resolveDone;
++  const done = new Promise((resolve) => { resolveDone = resolve; });
+   const abortController = new AbortController();
+ 
+   try {
++    // A message sent while this thread is still working interrupts that turn and continues it
++    if (sessionId) {
++      await interruptActiveCodexTurn(sessionId);
++    }
++
+     // Initialize Codex SDK
+     codex = new Codex({
+       codexPathOverride: DEFAULT_CODEX_EXECUTABLE,
+@@ -302,20 +334,26 @@ export async function queryCodex(command, options = {}, ws) {
+       thread = codex.startThread(threadOptions);
+     }
+ 
+-    // Get the thread ID
+-    currentSessionId = thread.id || sessionId || `codex-${Date.now()}`;
+-
+-    // Track the session
+-    activeCodexSessions.set(currentSessionId, {
+-      thread,
+-      codex,
+-      status: 'running',
+-      abortController,
+-      startedAt: new Date().toISOString()
+-    });
++    // Track the run under the real thread ID, so status checks, stop and reconnect find it
++    const registerRun = (threadId) => {
++      currentSessionId = threadId;
++      runEntry = {
++        thread,
++        codex,
++        status: 'running',
++        abortController,
++        writer: ws,
++        done,
++        startedAt: new Date().toISOString()
++      };
++      activeCodexSessions.set(threadId, runEntry);
++      sendMessage(ws, createNormalizedMessage({ kind: 'session_created', newSessionId: threadId, sessionId: threadId, provider: 'codex' }));
++    };
+ 
+-    // Send session created event
+-    sendMessage(ws, createNormalizedMessage({ kind: 'session_created', newSessionId: currentSessionId, sessionId: currentSessionId, provider: 'codex' }));
++    // A resumed thread is known up front; a new one gets its ID from the thread.started event
++    if (sessionId) {
++      registerRun(sessionId);
++    }
+ 
+     // Attached images go in as local_image inputs so the model actually sees them
+     const { imagePaths, tempDir } = await saveCodexImages(images);
+@@ -333,9 +371,12 @@ export async function queryCodex(command, options = {}, ws) {
+     });
+ 
+     for await (const event of streamedTurn.events) {
++      if (!runEntry && event.type === 'thread.started' && event.thread_id) {
++        registerRun(event.thread_id);
++      }
++
+       // Check if session was aborted
+-      const session = activeCodexSessions.get(currentSessionId);
+-      if (!session || session.status === 'aborted') {
++      if (runEntry?.status === 'aborted') {
+         break;
+       }
+ 
+@@ -369,8 +410,8 @@ export async function queryCodex(command, options = {}, ws) {
+       }
+     }
+ 
+-    // Send completion event
+-    if (!terminalFailure) {
++    // Send completion event (an aborted turn is completed by whoever aborted it)
++    if (!terminalFailure && runEntry?.status !== 'aborted') {
+       sendMessage(ws, createNormalizedMessage({ kind: 'complete', actualSessionId: thread.id, sessionId: currentSessionId, provider: 'codex' }));
+       notifyRunStopped({
+         userId: ws?.userId || null,
+@@ -382,9 +423,8 @@ export async function queryCodex(command, options = {}, ws) {
+     }
+ 
+   } catch (error) {
+-    const session = currentSessionId ? activeCodexSessions.get(currentSessionId) : null;
+     const wasAborted =
+-      session?.status === 'aborted' ||
++      runEntry?.status === 'aborted' ||
+       error?.name === 'AbortError' ||
+       String(error?.message || '').toLowerCase().includes('aborted');
+ 
+@@ -411,13 +451,14 @@ export async function queryCodex(command, options = {}, ws) {
+     }
+ 
+   } finally {
+-    // Update session status
+-    if (currentSessionId) {
+-      const session = activeCodexSessions.get(currentSessionId);
+-      if (session) {
+-        session.status = session.status === 'aborted' ? 'aborted' : 'completed';
++    // Update this run's status (a newer run may already own the thread's map entry)
++    if (runEntry) {
++      runEntry.status = runEntry.status === 'aborted' ? 'aborted' : 'completed';
++      if (activeCodexSessions.get(currentSessionId) === runEntry) {
++        activeCodexSessions.delete(currentSessionId);
+       }
+     }
++    resolveDone();
+ 
+     if (imageTempDir) {
+       await fs.rm(imageTempDir, { recursive: true, force: true }).catch((err) =>
+@@ -449,6 +490,23 @@ export function abortCodexSession(sessionId) {
+   return true;
+ }
+ 
++/**
++ * Reconnect a running session's writer to a new raw WebSocket (e.g. after a page refresh),
++ * so the rest of the turn streams to the client that is now viewing it.
++ * @param {string} sessionId - Session ID
++ * @param {Object} newRawWs - The new raw WebSocket connection
++ * @returns {boolean} True if the writer was reconnected
++ */
++export function reconnectCodexSessionWriter(sessionId, newRawWs) {
++  const session = activeCodexSessions.get(sessionId);
++  if (session?.status !== 'running' || !session.writer?.updateWebSocket) {
++    return false;
++  }
++  session.writer.updateWebSocket(newRawWs);
++  console.log(`[Codex] Writer swapped for session ${sessionId}`);
++  return true;
++}
++
+ /**
+  * Check if a session is active
+  * @param {string} sessionId - Session ID to check
+diff --git a/src/components/chat/hooks/useChatComposerState.ts b/src/components/chat/hooks/useChatComposerState.ts
+index 1b27d0fd..6ee6ad1f 100644
+--- a/src/components/chat/hooks/useChatComposerState.ts
++++ b/src/components/chat/hooks/useChatComposerState.ts
+@@ -491,7 +491,14 @@ export function useChatComposerState({
+     ) => {
+       event.preventDefault();
+       const currentInput = inputValueRef.current;
+-      if (!currentInput.trim() || isLoading || !selectedProject) {
++      // Codex: a message sent while it is working interrupts the turn and continues the same thread
++      const runningSessionId = currentSessionId || selectedSession?.id || null;
++      const canInterruptCodex =
++        provider === 'codex' &&
++        workflowMode === 'chat' &&
++        Boolean(runningSessionId) &&
++        !isTemporarySessionId(runningSessionId);
++      if (!currentInput.trim() || (isLoading && !canInterruptCodex) || !selectedProject) {
+         return;
+       }
+       // Guard against double-submit (onMouseDown + form submit both fire onSubmit)

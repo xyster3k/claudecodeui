@@ -7,6 +7,13 @@
 #   COMPOSE_FILE=docker-compose.yml:claudecodeui/deploy/lan/docker-compose.lan.yml
 # so every plain `docker compose ...` there includes this file. See README.md next to it.
 
+networks:
+  # stack_web was created by hand when the stack was restored from a snapshot, without
+  # compose labels, so compose refuses to adopt it as its own; use it as an external network.
+  web:
+    external: true
+    name: stack_web
+
 services:
   caddy:
     # No published ports: the only way in is through the tunnel.

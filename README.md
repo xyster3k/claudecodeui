@@ -6,6 +6,11 @@ The running UI is intentionally marked as `CloudCLI Custom`, `xyster3k`, and the
 
 Custom repository link used in the UI: `https://github.com/xyster3k/claudecodeui`.
 
+**Operations:** see [Current home deployment and migration handoff](#current-home-deployment-and-migration-handoff).
+The home VM is available for local testing; public URL cutover and normal deployment
+adaptation are still pending. The image observed on the VM is `p081`; older `p038`
+examples below describe the branding patch and are not the current deployment version.
+
 ## Why This Exists
 
 The upstream npm package (`@cloudcli-ai/cloudcli`) is prebuilt, so runtime patching after install is not practical. This build clones the upstream source at a pinned commit, applies auditable patch files, builds the app, and installs local helper scripts into the final image.
@@ -210,7 +215,216 @@ Local build:
 docker build -t siteboon/claudecodeui:custom .
 ```
 
-VPS rebuild:
+### Current home deployment and migration handoff
+
+Last verified: **2026-10-13, Europe/Madrid**. Re-check live state before making changes.
+
+| Item | Current value |
+| --- | --- |
+| Local working repository | `Z:\Projects\claudecodeui` |
+| Home application host | Ubuntu VM `192.168.1.31`, SSH `22`, user `xyster3k` |
+| VM resources | 10 GiB assigned RAM, 2 vCPU, 160 GiB virtual disk |
+| VM repository / stack | `/srv/stack/claudecodeui` / `/srv/stack` |
+| Local test UI | `http://192.168.1.31:3001` |
+| Running container / network | `claudecodeui` / `stack_web` |
+| Running image | `cloudcli-migration/claudecodeui:20261013` |
+| Patch repository HEAD at verification | `9b806eb27a09d44694436f1ab06d9cbfd24b7f67` (`p081`) |
+| Runtime versions verified | Node `22.23.3`, Codex `0.154.0`, Claude Code `2.1.283` |
+| QNAP storage / hypervisor | HomeCloud `192.168.1.82`, TS-262, 16 GiB physical RAM |
+| Previous CloudCLI VPS | `5.78.207.50`, SSH `22022`, user `xyster3k` |
+| Public URL | `https://cli.yuriypoteshkin.com`; Cloudflare cutover NOT performed |
+
+The user explicitly asked to postpone URL cutover. Continue local testing and
+prepare reviewable changes; do not change DNS, publish a Tunnel route, shut down
+the old VPS, or deploy without the relevant user authorization.
+
+Connect from the local machine:
+
+```bash
+ssh -i ~/.ssh/id_ed25519_xyster3k xyster3k@192.168.1.31
+```
+
+The QNAP SSH key is a different key, `id_ed25519_qnap_homecloud`, for
+`drpoteshkin@192.168.1.82`. Keep private key material out of the repository.
+The VM is managed by QNAP Virtualization Station (display name `CloudCLI-Lab`,
+domain UUID `125c5c7a-1003-4082-8f21-7c5f7490826f`). Its disk is
+`/share/Public/CloudCLI-Lab/vm/CloudCLI-Lab.img`, with a VirtIO NIC on bridge
+`qvs0`, MAC `52:54:00:4a:2c:ca`, and autostart configured with a 60-second delay.
+`192.168.1.31` was obtained through DHCP; verify/reserve the address before
+depending permanently on the current IP-bound port mapping. Storage is on the
+main SATA SSD volume; the NVMe remains the QNAP cache and was not reformatted.
+The separate LongevitySearch production server is `65.21.149.194`; its PM2
+services and commit `944739129` reported by another agent are not this repository.
+
+#### What has been completed
+
+- Captured 264 filesystem parts plus inventory, Docker images, three container
+  filesystem exports, Docker volume data, a filesystem manifest, and consistent
+  SQLite snapshots: **272 verified backup artifacts** in total.
+- All transferred artifacts passed SHA-256 checks. Sixteen SQLite snapshots
+  passed integrity checks; all sixteen were restored and checked on the VM.
+- Finished the VM restore worker's **271 steps**. This count excludes the
+  filesystem manifest, which is used to plan restoration rather than unpacked.
+- Restored application data under `/srv`, `/home`, `/root`, `/opt`, and
+  `/usr/local`, while retaining the VM's SSH authorized keys, network setup, and
+  machine identity. Other captured host files, the source swapfile, and Docker
+  logs remain in the NAS backup; they were not activated on the new VM.
+- Loaded original Docker images and imported all three container filesystem
+  snapshots with their saved runtime metadata. Only `claudecodeui` is running.
+- Verified the local UI and `/api/auth/status` return HTTP 200. This proves local
+  availability, not completion of user login, chat, terminal, or provider tests.
+- Caddy and oauth2-proxy snapshots are available but their containers are not
+  running. The local URL uses application login without the previous Google gate.
+
+The capture was online. SQLite snapshots are individually consistent, but the
+whole capture is not a single frozen point in time. New data written to either
+host since capture must be reconciled before any final switch.
+
+#### Persistent state and first ordinary deployment
+
+Existing application bind mounts are:
+
+| VM path | Container path |
+| --- | --- |
+| `/srv/projects` | `/home/node/projects` |
+| `/srv/stack/claude-home` | `/home/node/.claude` |
+| `/srv/stack/codex-home` | `/home/node/.codex` |
+| `/srv/stack/gh-config` | `/home/node/.config/gh` |
+| `/srv/stack/cloudcli-data` | `/home/node/.cloudcli` |
+| `/srv/stack/git-home/.gitconfig` | `/home/node/.gitconfig` |
+| `/srv/stack/deploy-ssh` | `/home/node/.ssh` |
+| `/srv/stack/claudecodeui-data` | `/home/node/.claude-code-ui` |
+
+The snapshot additionally preserves unmounted files, including
+`/home/node/.claude.json` and `/home/node/.local` (user-installed Python packages
+and CLI state). A fresh build/recreation does not preserve those automatically.
+Before the first normal deployment:
+
+1. Finish or stop active agents with user authorization, then take an up-to-date
+   backup of writable mounts, SQLite, `.claude.json`, and `.local`.
+2. Add reviewed deployment configuration in git for the LAN mapping
+   `192.168.1.31:3001:3001`, for example `docker-compose.lan.yml`. The current
+   `/srv/stack/docker-compose.yml` does not publish the app's port. Preserve the
+   LAN address when selecting compose files for every subsequent deployment.
+3. Migrate unmounted state to persistent directories and preserve UID/GID
+   `1000:1000`. Preserve package requirements as part of the reproducible image
+   where appropriate; do not rely only on manually installed runtime packages.
+4. If using `CLAUDE_CONFIG_DIR=/home/node/.claude`, migrate the global config to
+   the appropriate file in that mounted directory and keep `/home/node/.claude.json`
+   compatible, e.g. through an image-created symlink or reviewed code changes.
+   The UI reads the home-level file in `server/claude-sdk.js`,
+   `server/modules/providers/list/claude/claude-mcp.provider.ts`, and
+   `server/utils/mcp-detector.js`. Verify UI and CLI MCP settings agree before
+   replacing the snapshot container. Do not assume the UI ignores this file.
+5. Keep `cloudcli-migration/claudecodeui:20261013` and backups for rollback.
+   Returning to an image does not undo database or bind-mount changes.
+6. Use the normal local edit / authorized commit and push / deployment workflow.
+   Do not edit application code directly on either server. Verify login, existing
+   sessions, projects, terminal/WebSockets, Claude/Codex, and persistence after
+   recreation before declaring deployment complete.
+
+**CI destination must be checked before a push.** `.github/workflows/deploy.yml`
+runs on pushes to `main` and `workflow_dispatch`, verifies the patch stack, then
+pulls/builds/recreates the container on the host in `DEPLOY_HOST`, `DEPLOY_PORT`,
+`DEPLOY_USER`, with `DEPLOY_SSH_KEY` and `DEPLOY_KNOWN_HOSTS`. The current secret
+values have not been inspected in this migration. A documentation-only push can
+still deploy. Do not assume the target switched to the home VM. A hosted GitHub
+runner cannot directly use the private LAN IP without an approved connectivity
+solution; a public HTTP Tunnel alone is not ordinary SSH deploy connectivity.
+
+#### Backup, logs, and read-only checks
+
+NAS backup location:
+
+```text
+/share/CACHEDEV1_DATA/Public/CloudCLI-Lab/migration-20261013-005917
+Z:\CloudCLI-Lab\migration-20261013-005917
+```
+
+The backup and `source-inventory.json` contain private credentials/configuration.
+Retain their restricted access. Never copy their contents into git or public logs.
+
+VM migration metadata is in `/srv/cloudcli-migration`:
+
+- `source-metadata/source-inventory.json`: private saved container configuration.
+- `container-snapshots/`: preserved compressed filesystem snapshots.
+- `runtime-state.json`: readiness state; it records `ready_for_local_test`.
+- `runtime-restore.log`: historical import/start log with a final verified LAN
+  readiness entry. Earlier failure entries remain as history.
+- `incoming/`: temporary files from interrupted uploads; not application data.
+  Do not delete migration artifacts without explicit cleanup authorization.
+
+Run these read-only checks after SSHing into the VM:
+
+```bash
+docker ps --format '{{.Names}} {{.Image}} {{.Status}} {{.Ports}}'
+curl -fsS http://192.168.1.31:3001/api/auth/status
+sudo cat /srv/cloudcli-migration/runtime-state.json
+docker exec claudecodeui node --version
+docker exec claudecodeui codex --version
+docker exec claudecodeui claude --version
+free -h
+df -h /
+```
+
+The VM publishes port 3001 on its LAN address. A host-side probe to
+`127.0.0.1:3001` will fail with the current mapping. Inside the container,
+`127.0.0.1:3001` is valid.
+
+Windows migration workers, state, and logs remain in:
+
+```text
+C:\Users\yuriy\Documents\Codex\2026-10-12\new-chat\work\qnap-cloudcli
+```
+
+That directory contains `capture-server.py`, `restore-server.py`,
+`runtime-restore.py`, their saved state, and historical logs. These are migration
+tools, not the normal deployment workflow. Capture uses independent SHA-256
+verified parts and immutable checkpoints. Data restore caches each archive
+locally, verifies it, and resumes VM uploads from confirmed remote byte offsets;
+the remote writer releases idle connections after 45 seconds. Do not restart
+completed workers just because an old log contains a `FAILED` line. Use current
+state and live container/HTTP checks, then diagnose before any authorized retry.
+
+The existing monitor is:
+
+```powershell
+& 'C:\Users\yuriy\Documents\Codex\2026-10-12\new-chat\outputs\migration-monitor.ps1'
+```
+
+Capture and data restore finished; those Windows workers are no longer required.
+The running application is independent of that PC. Keep the NAS/VM powered on.
+
+#### Deferred public URL and memory work
+
+After user approval, a proposed route is Cloudflare Tunnel -> Caddy -> existing
+oauth2-proxy authentication checks -> CloudCLI. The saved oauth2-proxy has
+`--upstream=static://202`; pointing a Tunnel directly at it will not serve the UI.
+The existing Google callback is
+`https://cli.yuriypoteshkin.com/oauth2/callback`. Prepare and verify proxy/TLS,
+Google login, streaming, and WebSockets before changing the production route.
+Resolve changes written to both machines first; do not blindly synchronize the
+old VPS over new VM work. Keep the previous VPS until rollback is verified.
+
+RAM remains 10 GiB. Node's measured default heap limit was about 2096 MiB; this
+is a per-process limit, not evidence that the VM needs more RAM. For the separate
+LongevitySearch project's heavy typecheck, the recommendation was:
+
+```bash
+NODE_OPTIONS=--max-old-space-size=6144 npm run typecheck
+```
+
+This recommendation has NOT been applied by this migration task. Scope it to
+that project's typecheck command rather than every Node process or the whole
+CloudCLI container. Archive-related TypeScript errors need separate diagnosis;
+`.gitignore` does not exclude files from TypeScript. That project and its PM2
+production services should be handled in their own repository/workflow.
+
+### Legacy rebuild reference
+
+The following was the previous VPS rebuild procedure. It is **not ready to run
+on the home VM** until the persistence, port mapping, CI, and backup steps above
+are completed and deployment is authorized:
 
 ```bash
 cd /srv/stack

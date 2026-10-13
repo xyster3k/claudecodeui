@@ -1,5 +1,17 @@
 # Global Development Rules
 
+## CloudCLI home-server handoff
+
+For this repository, read `AGENTS.md` and the **Current home deployment and
+migration handoff** section of `README.md` before choosing a server or deploying.
+The local test VM is `xyster3k@192.168.1.31:22`; the previous CloudCLI VPS is
+`xyster3k@5.78.207.50:22022`. The public URL still uses the previous deployment.
+The user has postponed URL cutover. The VM currently runs a restored snapshot;
+normal container recreation must first preserve `.claude.json`, `.local`, and
+the LAN port mapping. A `main` push also triggers GitHub Actions deployment, whose
+actual destination must be verified before pushing. These notes do not authorize
+commits, pushes, deployments, restarts, or DNS changes.
+
 ## NEVER sign commits as co-author
 
 NEVER add "Co-Authored-By", "Co-authored-by", or any variation of co-author attribution to commit messages. Do not add any AI/bot/Claude signature, attribution, or credit line to commits. Commits are authored solely by the user.

@@ -77,7 +77,14 @@ RUN chown -R node:node /app
 
 USER node
 WORKDIR /home/node
-RUN mkdir -p /home/node/.claude /home/node/.codex /home/node/.config/gh /home/node/projects /home/node/.cloudcli
+RUN mkdir -p /home/node/.claude /home/node/.codex /home/node/.config/gh /home/node/projects /home/node/.cloudcli /home/node/.local
+
+# Claude Code keeps its main config (account, project trust, plugins) in ~/.claude.json, which
+# is outside every bind mount and was lost on each container recreate. With CLAUDE_CONFIG_DIR
+# the CLI writes it to the mounted ~/.claude instead. The app still reads ~/.claude.json itself
+# (claude-sdk.js, the Claude MCP provider, mcp-detector), so that path points at the same file.
+ENV CLAUDE_CONFIG_DIR=/home/node/.claude
+RUN ln -s /home/node/.claude/.claude.json /home/node/.claude.json
 
 ENV PORT=3001
 EXPOSE 3001

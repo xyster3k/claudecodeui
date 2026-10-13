@@ -1,0 +1,56 @@
+# Caddy behind Cloudflare Tunnel (LAN box). Used by docker-compose.lan.yml in place of
+# /srv/stack/Caddyfile.
+#
+# Cloudflare terminates TLS at its edge and cloudflared forwards plain HTTP to caddy:80 inside
+# the Docker network, so Caddy must not try to obtain certificates (ACME cannot reach this box:
+# it has no inbound ports). Every hop the browser sees is still HTTPS, so the scheme is pinned
+# to https wherever oauth2-proxy or a redirect needs it — {scheme} would say "http" here.
+
+{
+	auto_https off
+	servers {
+		# cloudflared reaches Caddy from the private Docker network; take the visitor's IP
+		# from the header Cloudflare sets instead of the tunnel container's address.
+		trusted_proxies static private_ranges
+		client_ip_headers Cf-Connecting-Ip X-Forwarded-For
+	}
+}
+
+http://{$DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
+	handle /oauth2/* {
+		reverse_proxy oauth2-proxy:4180 {
+			header_up X-Real-IP {client_ip}
+			header_up X-Scheme https
+			header_up X-Forwarded-Proto https
+			header_up Host {host}
+		}
+	}
+
+	handle {
+		forward_auth oauth2-proxy:4180 {
+			uri /oauth2/auth
+			header_up X-Forwarded-Proto https
+			copy_headers X-Auth-Request-User X-Auth-Request-Email X-Auth-Request-Preferred-Username
+
+			@err status 401
+			handle_response @err {
+				redir * /oauth2/sign_in?rd=https://{host}{uri} 302
+			}
+		}
+
+		reverse_proxy claudecodeui:3001 {
+			header_up X-Real-IP {client_ip}
+			header_up X-Forwarded-Proto https
+			header_up Host {host}
+		}
+	}
+}

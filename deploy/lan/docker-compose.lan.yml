@@ -1,0 +1,38 @@
+# Overrides /srv/stack/docker-compose.yml for the LAN box (QNAP VM cloudcli-lab, 192.168.1.31).
+#
+# Public access goes Cloudflare Tunnel -> caddy -> oauth2-proxy (Google) -> claudecodeui.
+# cloudflared only dials out, so the home connection has no open inbound ports.
+#
+# Used from /srv/stack via COMPOSE_FILE in /srv/stack/.env:
+#   COMPOSE_FILE=docker-compose.yml:claudecodeui/deploy/lan/docker-compose.lan.yml
+# so every plain `docker compose ...` there includes this file. See README.md next to it.
+
+services:
+  caddy:
+    # No published ports: the only way in is through the tunnel.
+    ports: !reset []
+    volumes: !override
+      - ./claudecodeui/deploy/lan/Caddyfile.tunnel:/etc/caddy/Caddyfile:ro
+      - ./caddy/data:/data
+      - ./caddy/config:/config
+
+  claudecodeui:
+    # Named so a rollback can retag the restored snapshot image to this name.
+    image: stack-claudecodeui:lan
+    # Direct access from the home network (no Google gate on this path).
+    ports:
+      - "3001:3001"
+    volumes:
+      # User-installed Python tools (pip --user) live here; keep them across rebuilds.
+      - ./home-local:/home/node/.local
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.10.0
+    container_name: cloudflared
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?TUNNEL_TOKEN must be set in /srv/stack/.env}
+    networks: [web]
+    depends_on:
+      - caddy

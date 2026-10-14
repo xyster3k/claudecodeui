@@ -1,0 +1,27 @@
+diff --git a/src/components/chat/view/subcomponents/ChatComposer.tsx b/src/components/chat/view/subcomponents/ChatComposer.tsx
+index 88b95ff..7337541 100644
+--- a/src/components/chat/view/subcomponents/ChatComposer.tsx
++++ b/src/components/chat/view/subcomponents/ChatComposer.tsx
+@@ -2,13 +2,11 @@ import { useTranslation } from 'react-i18next';
+ import type {
+   ChangeEvent,
+   ClipboardEvent,
+-  Dispatch,
+   FormEvent,
+   KeyboardEvent,
+   MouseEvent,
+   ReactNode,
+   RefObject,
+-  SetStateAction,
+   TouchEvent,
+ } from 'react';
+ import { ImageIcon, MicIcon, MessageSquareIcon, WrenchIcon, TestTube2Icon, XIcon, ArrowDownIcon } from 'lucide-react';
+@@ -67,7 +65,7 @@ interface ChatComposerProps {
+   permissionMode: PermissionMode | string;
+   onModeSwitch: () => void;
+   thinkingMode: string;
+-  setThinkingMode: Dispatch<SetStateAction<string>>;
++  setThinkingMode: (mode: string) => void;
+   tokenBudget: { used?: number; total?: number } | null;
+   slashCommandsCount: number;
+   onToggleCommandMenu: () => void;

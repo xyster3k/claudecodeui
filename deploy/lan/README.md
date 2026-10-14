@@ -32,11 +32,14 @@ recreate drops the tunnel and the `:3001` port.**
 
 ## Normal deploy
 
-From a local checkout, after pushing `main`, one command does everything below (refuses while
-an agent is running unless `--force`; health-checks at the end):
+From a local checkout, after pushing `main`, one command does everything below. It pulls and
+builds first (the running app is untouched), then restarts only if no agent is running, and
+health-checks at the end:
 
 ```bash
-deploy/lan/deploy.sh
+deploy/lan/deploy.sh            # refuse to restart while an agent runs
+deploy/lan/deploy.sh --wait     # restart once no agent has run for 5 min (up to 12 h)
+deploy/lan/deploy.sh --force    # restart now, killing running agents
 ```
 
 The GitHub Actions deploy job cannot reach this VM (it is on the LAN), so it fails at its SSH
@@ -45,8 +48,11 @@ step; only its verify job is meaningful for now.
 Manual equivalent — only when no agent is running. The container has no `ps`, so check with:
 
 ```bash
-docker exec claudecodeui sh -c 'for p in /proc/[0-9]*; do c=$(tr "\0" " " < $p/cmdline 2>/dev/null); case "$c" in *"codex exec"*|*claude*) echo "${p#/proc/} $c";; esac; done'
+docker exec claudecodeui sh -c 'for p in /proc/[0-9]*; do set -- $(tr "\000" " " < $p/cmdline 2>/dev/null); [ $# -gt 0 ] || continue; for a in "$1" "${2:-}"; do case "${a##*/}" in claude|codex|gemini) echo "${p#/proc/} ${a##*/}"; break;; esac; done; done'
 ```
+
+(Matches the executable name only; a substring match on `claude` also hits the permanent
+plugin server under `~/.claude-code-ui`.)
 
 Empty output means it is safe to deploy:
 

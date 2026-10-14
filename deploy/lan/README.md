@@ -32,7 +32,17 @@ recreate drops the tunnel and the `:3001` port.**
 
 ## Normal deploy
 
-Only when no agent is running. The container has no `ps`, so check with:
+From a local checkout, after pushing `main`, one command does everything below (refuses while
+an agent is running unless `--force`; health-checks at the end):
+
+```bash
+deploy/lan/deploy.sh
+```
+
+The GitHub Actions deploy job cannot reach this VM (it is on the LAN), so it fails at its SSH
+step; only its verify job is meaningful for now.
+
+Manual equivalent — only when no agent is running. The container has no `ps`, so check with:
 
 ```bash
 docker exec claudecodeui sh -c 'for p in /proc/[0-9]*; do c=$(tr "\0" " " < $p/cmdline 2>/dev/null); case "$c" in *"codex exec"*|*claude*) echo "${p#/proc/} $c";; esac; done'

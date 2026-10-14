@@ -38,6 +38,29 @@ services:
       # Gemini CLI login (oauth_creds.json) and settings; keep them across rebuilds.
       - ./gemini-home:/home/node/.gemini
 
+  # Telegram notifications: logins, app errors, crashes/OOM, deploys, tunnel outages.
+  # Reads other containers' logs/events from the Docker socket; see notifier/notifier.js.
+  # Messages are prefixed [LAN]. Without TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID it stays idle.
+  notifier:
+    image: node:22-alpine
+    container_name: notifier
+    restart: unless-stopped
+    command: ["node", "/notifier/notifier.js"]
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      TELEGRAM_THREAD_ID: ${TELEGRAM_THREAD_ID:-}
+      NOTIFY_LABEL: LAN
+    volumes:
+      - ./claudecodeui/deploy/lan/notifier:/notifier:ro
+      # Owned root:docker 0660; the container runs as root (no capabilities) to read it.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    # Own default network: needs only outbound HTTPS to api.telegram.org.
+
   cloudflared:
     image: cloudflare/cloudflared:2026.10.0
     container_name: cloudflared

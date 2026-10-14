@@ -1,0 +1,54 @@
+diff --git a/server/routes/auth.js b/server/routes/auth.js
+index dcb2e3f..edb644a 100644
+--- a/server/routes/auth.js
++++ b/server/routes/auth.js
+@@ -5,6 +5,20 @@ import { getConnection } from '../modules/database/connection.js';
+ import { generateToken, authenticateToken } from '../middleware/auth.js';
+ 
+ const router = express.Router();
++
++// Login audit lines ("[AUTH] ...") are picked up by the LAN deploy's Telegram notifier.
++// Behind Cloudflare Tunnel + Caddy the socket address is the proxy, so prefer the
++// forwarded client address; a direct LAN request has neither header.
++function clientAddress(req) {
++  const forwarded = req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'];
++  const first = String(forwarded || '').split(',')[0].trim();
++  return first || req.socket?.remoteAddress || 'unknown';
++}
++
++function logLoginAttempt(req, username, outcome) {
++  const via = req.headers['x-forwarded-for'] ? 'proxy' : 'direct';
++  console.log(`[AUTH] login ${outcome} user=${JSON.stringify(String(username || ''))} ip=${clientAddress(req)} via=${via}`);
++}
+ const db = getConnection();
+ 
+ // Check auth status and setup requirements
+@@ -93,21 +107,24 @@ router.post('/login', async (req, res) => {
+     // Get user from database
+     const user = userDb.getUserByUsername(username);
+     if (!user) {
++      logLoginAttempt(req, username, 'failed reason=unknown-user');
+       return res.status(401).json({ error: 'Invalid username or password' });
+     }
+-    
++
+     // Verify password
+     const isValidPassword = await bcrypt.compare(password, user.password_hash);
+     if (!isValidPassword) {
++      logLoginAttempt(req, username, 'failed reason=bad-password');
+       return res.status(401).json({ error: 'Invalid username or password' });
+     }
+-    
++
+     // Generate token
+     const token = generateToken(user);
+-    
++
+     // Update last login
+     userDb.updateLastLogin(user.id);
+-    
++    logLoginAttempt(req, user.username, 'ok');
++
+     res.json({
+       success: true,
+       user: { id: user.id, username: user.username },

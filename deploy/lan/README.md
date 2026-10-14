@@ -20,6 +20,7 @@ port forwards on the router.
   ports, swaps in `Caddyfile.tunnel`, publishes the app on `:3001`, persists `~/.local` and
   `~/.gemini` (Gemini CLI login), and passes an optional `GEMINI_API_KEY` from `.env`.
 - `Caddyfile.tunnel` is Caddy behind the tunnel: plain HTTP inside, scheme pinned to https.
+- `notifier/notifier.js` is the Telegram notifier (service `notifier`, see below).
 - The `Dockerfile` sets `CLAUDE_CONFIG_DIR=/home/node/.claude` and symlinks
   `~/.claude.json` into it, so Claude Code's config lives in the bind-mounted `claude-home`.
 
@@ -54,6 +55,38 @@ docker logs --tail 20 cloudflared        # "Registered tunnel connection" x4
 curl -s -o /dev/null -w '%{http_code}\n' http://192.168.1.31:3001/            # 200
 docker exec caddy wget -qSO- --header "Host: cli.yuriypoteshkin.com" http://localhost/ 2>&1 | grep -m1 -E 'HTTP/|Location'   # 302 to /oauth2/sign_in
 ```
+
+## Telegram notifications
+
+The `notifier` container posts to the Telegram topic set by `TELEGRAM_CHAT_ID` and
+`TELEGRAM_THREAD_ID`, using the bot in `TELEGRAM_BOT_TOKEN` (all three in `/srv/stack/.env`;
+the old VPS used the same bot and topic). Every message starts with `[LAN]`. It reads the other
+containers' logs and events from the Docker socket (read-only mount; no capabilities,
+read-only filesystem) and sends:
+
+| Event | Source |
+|---|---|
+| 🔑 Google login / ⚠️ failed | `oauth2-proxy` `[AuthSuccess]` / `[AuthFailure]` lines (email, IP) |
+| 🔑 App login / ⚠️ failed | `claudecodeui` `[AUTH] login ...` lines from patch 084 (user, IP, LAN or public) |
+| ❗ App error | `claudecodeui` stderr, stack traces grouped; known noise is ignored (`APP_ERROR_IGNORE`) |
+| 💥 crash / OOM, ⏹ stop, ⚠️ SIGKILL, ▶️ start | Docker events for `claudecodeui`, `oauth2-proxy`, `cloudflared`, `caddy` |
+| 🚀 New version deployed | a watched container starting from a different image than before |
+| 🔴 Tunnel degraded / 🟢 restored | a `cloudflared` connection down for over 60 s (brief re-registers are normal and ignored) |
+
+The same error or failed login is sent once, then summarized as "repeated ×N" after
+10 minutes (`ERROR_WINDOW_SEC`). Long messages are split into several parts, never cut.
+Without the token and chat ID the container stays idle and logs why.
+
+It runs as an independent service, so it can be started or updated without touching the app:
+
+```bash
+cd /srv/stack
+docker compose up -d notifier
+docker logs --tail 20 notifier      # "notifier running; label LAN ..."; the topic gets "📡 Notifier started"
+```
+
+To add an ignore pattern or event, edit `notifier/notifier.js` locally, push, pull on the VM,
+and run `docker compose restart notifier`.
 
 ## Rollback of the app container
 

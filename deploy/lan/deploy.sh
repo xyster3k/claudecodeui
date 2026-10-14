@@ -81,6 +81,10 @@ fi
 echo "== Build (running app untouched) $(ts)"
 docker compose build claudecodeui
 
+echo "== Notifier (independent of agents; its code is bind-mounted, so restart to reload)"
+docker compose up -d notifier
+docker compose restart notifier
+
 echo "== Agent gate ($mode) $(ts)"
 busy="$(agents)"
 if [ -n "$busy" ]; then

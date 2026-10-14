@@ -213,9 +213,16 @@ function reportError(source, text, title = 'error', icon = '❗') {
 // App stderr: group lines arriving close together (stack traces) into one report.
 let appErrBuf = [];
 let appErrTimer = null;
+let skippingIgnoredTrace = false;
 
 function onAppStderr(line) {
-  if (APP_ERROR_IGNORE.some((re) => re.test(line))) return;
+  // An ignored line takes its stack trace ("    at ...") with it.
+  if (APP_ERROR_IGNORE.some((re) => re.test(line))) {
+    skippingIgnoredTrace = true;
+    return;
+  }
+  if (skippingIgnoredTrace && /^\s+(at |\.\.\. \d+ more)/.test(line)) return;
+  skippingIgnoredTrace = false;
   appErrBuf.push(line);
   clearTimeout(appErrTimer);
   appErrTimer = setTimeout(() => {

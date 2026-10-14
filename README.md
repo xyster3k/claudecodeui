@@ -23,6 +23,7 @@ claudecodeui/
 |-- extras/
 |   |-- cloudcli-git-credential # GitHub PAT credential helper backed by CloudCLI auth DB
 |   |-- cloudcli-project        # per-project git identity and token routing helper
+|   |-- cloudcli-gemini-login   # Gemini "Login with Google" for the headless container
 |   `-- etc-gitconfig           # global credential helper wiring for the container
 |-- patches/                   # local customizations, applied in filename order
 `-- README.md                  # this guide and feature inventory
@@ -61,6 +62,19 @@ models. Bump the pin whenever adopting a model that needs a newer CLI, and verif
 ```bash
 docker exec claudecodeui codex --version
 docker exec claudecodeui node -e "console.log(JSON.parse(require('fs').readFileSync('/home/node/.codex/models_cache.json','utf8')).models.map(m=>m.id))"
+```
+
+## Pinned Gemini CLI
+
+`GEMINI_CLI_VERSION` in `Dockerfile` (currently `0.63.0`) pins the globally installed
+`@google/gemini-cli`, for the same cached-layer reason as Codex. `cloudcli-gemini-login`
+turns off the CLI's self-update, so bump the pin to upgrade it. The login (`oauth_creds.json`,
+`google_accounts.json`) and `settings.json` live in `~/.gemini`, bind-mounted from
+`/srv/stack/gemini-home`. Verify with:
+
+```bash
+docker exec claudecodeui gemini --version
+docker exec claudecodeui ls -l /home/node/.gemini
 ```
 
 ## User Guide
@@ -184,6 +198,7 @@ Every user-visible patch should be listed here when added. Keep this table curre
 | `079-voice-input-language.patch` | Voice input language | An EN/RU switch next to the Voice button picks the speech-recognition language (the browser API cannot auto-detect it). The choice is remembered per browser; switching while listening restarts recognition in the new language. |
 | `080-codex-image-input.patch` | Codex sees attached images | Images attached in chat were silently dropped for OpenAI/Codex models: `queryCodex` never read `options.images`. They are now written to a temp dir and passed as `local_image` inputs (`codex exec --image`, also on resumed threads), so the model receives the actual pixels. Temp files are removed after the turn. |
 | `081-codex-stop-and-interrupt.patch` | Codex stop + send while working | A new Codex thread was tracked under a placeholder `codex-<timestamp>` ID instead of its real thread ID, so status checks found nothing: no Stop button, no working indicator, and Stop could not find the run. Runs are now registered under the real ID from `thread.started`. A message sent while Codex is working (chat mode) interrupts the current turn and resumes the same thread with it; the work done so far stays in the thread history. Reloading the page reattaches the live stream to the running turn, like Claude sessions. Builder also now receives the real Codex thread ID. |
+| `082-gemini-google-login.patch` | Gemini Google-account login | Settings → Gemini → Login opened a static "Setup Gemini API Access" page with a non-existent `gemini config set api_key` command, so Gemini could only be used with an API key (and the CLI was not installed in the image at all). Login now opens a terminal running `cloudcli-gemini-login`: it sets `security.auth.selectedType=oauth-personal` in `~/.gemini/settings.json` and runs Gemini with `NO_BROWSER=true`, which prints a Google sign-in URL and reads the authorization code back from the terminal. This uses the Google account's own quota (free tier or Google AI Pro/Ultra). Type `/quit` once Gemini's prompt appears. `GEMINI_API_KEY` in the server environment still works as an alternative. Also fixes the install check, which reported a missing CLI as "Gemini CLI not configured" because `spawn.sync` does not throw on ENOENT. |
 
 ## Adding A Feature
 

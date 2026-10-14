@@ -29,9 +29,14 @@ services:
     # Direct access from the home network (no Google gate on this path).
     ports:
       - "3001:3001"
+    environment:
+      # Optional alternative to "Login with Google": set GEMINI_API_KEY in /srv/stack/.env.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     volumes:
       # User-installed Python tools (pip --user) live here; keep them across rebuilds.
       - ./home-local:/home/node/.local
+      # Gemini CLI login (oauth_creds.json) and settings; keep them across rebuilds.
+      - ./gemini-home:/home/node/.gemini
 
   cloudflared:
     image: cloudflare/cloudflared:2026.10.0

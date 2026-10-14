@@ -1,0 +1,52 @@
+#!/bin/bash
+# cloudcli-gemini-login — sign the Gemini CLI in with a Google account.
+#
+# Run by CloudCLI's Gemini "Login" button (patch 082). Uses "Login with Google", which
+# covers the free tier and Google AI Pro/Ultra subscriptions — no API key needed.
+#
+# The CLI's normal browser flow waits for a callback on localhost inside the container,
+# which a remote browser can never reach. With NO_BROWSER=true it prints a URL instead
+# and reads the authorization code back from this terminal.
+#
+# The auth type is written to ~/.gemini/settings.json so that the non-interactive
+# `gemini -p` runs CloudCLI starts for chats use the same login (oauth_creds.json).
+
+set -euo pipefail
+
+GEMINI_DIR="${GEMINI_CLI_HOME:-$HOME}/.gemini"
+mkdir -p "$GEMINI_DIR"
+
+GEMINI_SETTINGS="$GEMINI_DIR/settings.json" node -e '
+const fs = require("fs");
+const file = process.env.GEMINI_SETTINGS;
+let settings = {};
+if (fs.existsSync(file)) {
+  try {
+    settings = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (err) {
+    console.error(`Cannot parse ${file} (${err.message}); fix or remove it, then retry.`);
+    process.exit(1);
+  }
+}
+settings.security = settings.security || {};
+settings.security.auth = settings.security.auth || {};
+settings.security.auth.selectedType = "oauth-personal";
+// The CLI is pinned in the image; a self-update would be lost on the next rebuild.
+settings.general = settings.general || {};
+settings.general.enableAutoUpdate = false;
+settings.general.enableAutoUpdateNotification = false;
+fs.writeFileSync(file, JSON.stringify(settings, null, 2) + "\n");
+'
+
+if [ -s "$GEMINI_DIR/oauth_creds.json" ]; then
+  echo "Existing Google login found in $GEMINI_DIR/oauth_creds.json."
+  echo "To switch accounts, run /auth inside Gemini (or delete that file and log in again)."
+else
+  echo "Gemini will print a Google sign-in URL. Open it, sign in, and paste the"
+  echo "authorization code back here."
+fi
+echo "When Gemini's prompt appears, you are logged in — type /quit to close it."
+echo
+
+export NO_BROWSER=true
+exec gemini

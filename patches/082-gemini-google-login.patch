@@ -1,0 +1,138 @@
+diff --git a/server/modules/providers/list/gemini/gemini-auth.provider.ts b/server/modules/providers/list/gemini/gemini-auth.provider.ts
+index 60b0749..9adabe5 100644
+--- a/server/modules/providers/list/gemini/gemini-auth.provider.ts
++++ b/server/modules/providers/list/gemini/gemini-auth.provider.ts
+@@ -22,8 +22,9 @@ export class GeminiProviderAuth implements IProviderAuth {
+   private checkInstalled(): boolean {
+     const cliPath = process.env.GEMINI_PATH || 'gemini';
+     try {
+-      spawn.sync(cliPath, ['--version'], { stdio: 'ignore', timeout: 5000 });
+-      return true;
++      // spawn.sync reports a missing binary (ENOENT) via result.error rather than throwing.
++      const result = spawn.sync(cliPath, ['--version'], { stdio: 'ignore', timeout: 5000 });
++      return !result.error && result.status === 0;
+     } catch {
+       return false;
+     }
+diff --git a/server/modules/websocket/services/shell-websocket.service.ts b/server/modules/websocket/services/shell-websocket.service.ts
+index 6cc877e..0872e2d 100644
+--- a/server/modules/websocket/services/shell-websocket.service.ts
++++ b/server/modules/websocket/services/shell-websocket.service.ts
+@@ -186,6 +186,7 @@ export function handleShellConnection(
+           (initialCommand.includes('setup-token') ||
+             initialCommand.includes('cursor-agent login') ||
+             initialCommand.includes('codex login') ||
++            initialCommand.includes('cloudcli-gemini-login') ||
+             initialCommand.includes('auth login'));
+ 
+         const commandSuffix =
+diff --git a/src/components/provider-auth/view/ProviderLoginModal.tsx b/src/components/provider-auth/view/ProviderLoginModal.tsx
+index a16d612..2bbb8ce 100644
+--- a/src/components/provider-auth/view/ProviderLoginModal.tsx
++++ b/src/components/provider-auth/view/ProviderLoginModal.tsx
+@@ -40,14 +40,17 @@ const getProviderCommand = ({
+     return 'codex login --device-auth';
+   }
+ 
+-  return 'gemini status';
++  // Google-account login (Google AI Pro/Ultra subscription or free tier) via the
++  // headless OAuth flow: the CLI prints a URL and reads the code back from the
++  // terminal, because a browser callback on localhost can't reach the container.
++  return 'cloudcli-gemini-login';
+ };
+ 
+ const getProviderTitle = (provider: LLMProvider) => {
+   if (provider === 'claude') return 'Claude CLI Login';
+   if (provider === 'cursor') return 'Cursor CLI Login';
+   if (provider === 'codex') return 'Codex CLI Login';
+-  return 'Gemini CLI Configuration';
++  return 'Gemini CLI Login';
+ };
+ 
+ export default function ProviderLoginModal({
+@@ -85,62 +88,31 @@ export default function ProviderLoginModal({
+         </div>
+ 
+         <div className="flex-1 overflow-hidden">
+-          {provider === 'gemini' ? (
+-            <div className="flex h-full flex-col items-center justify-center bg-gray-50 p-8 text-center dark:bg-gray-900/50">
+-              <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-full bg-blue-100 dark:bg-blue-900/30">
+-                <KeyRound className="h-8 w-8 text-blue-600 dark:text-blue-400" />
+-              </div>
+-
+-              <h4 className="mb-3 text-xl font-medium text-gray-900 dark:text-white">Setup Gemini API Access</h4>
+-
+-              <p className="mb-8 max-w-md text-gray-600 dark:text-gray-400">
+-                The Gemini CLI requires an API key to function. Configure it in your terminal first.
+-              </p>
+-
+-              <div className="w-full max-w-lg rounded-xl border border-gray-200 bg-white p-6 text-left shadow-sm dark:border-gray-700 dark:bg-gray-800">
+-                <ol className="space-y-4">
+-                  <li className="flex gap-4">
+-                    <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-blue-100 text-sm font-medium text-blue-600 dark:bg-blue-900/50 dark:text-blue-400">
+-                      1
+-                    </div>
+-                    <div>
+-                      <p className="mb-1 text-sm font-medium text-gray-900 dark:text-white">Get your API key</p>
+-                      <a
+-                        href="https://aistudio.google.com/app/apikey"
+-                        target="_blank"
+-                        rel="noreferrer"
+-                        className="flex inline-flex items-center gap-1 text-sm text-blue-600 hover:underline dark:text-blue-400"
+-                      >
+-                        Google AI Studio <ExternalLink className="h-3 w-3" />
+-                      </a>
+-                    </div>
+-                  </li>
+-                  <li className="flex gap-4">
+-                    <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-blue-100 text-sm font-medium text-blue-600 dark:bg-blue-900/50 dark:text-blue-400">
+-                      2
+-                    </div>
+-                    <div>
+-                      <p className="mb-1 text-sm font-medium text-gray-900 dark:text-white">Run configuration</p>
+-                      <p className="mb-2 text-sm text-gray-600 dark:text-gray-400">Open your terminal and run:</p>
+-                      <code className="block rounded bg-gray-100 px-3 py-2 font-mono text-sm text-pink-600 dark:bg-gray-900 dark:text-pink-400">
+-                        gemini config set api_key YOUR_KEY
+-                      </code>
+-                    </div>
+-                  </li>
+-                </ol>
+-              </div>
++          <StandaloneShell project={DEFAULT_PROJECT_FOR_EMPTY_SHELL} command={command} onComplete={handleComplete} minimal={true} />
++        </div>
+ 
+-              <button
+-                onClick={onClose}
+-                className="mt-8 rounded-lg bg-blue-600 px-6 py-2.5 font-medium text-white transition-colors hover:bg-blue-700"
++        {provider === 'gemini' && (
++          <div className="flex items-start gap-3 border-t border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600 dark:border-gray-700 dark:bg-gray-900/50 dark:text-gray-400">
++            <KeyRound className="mt-0.5 h-4 w-4 flex-shrink-0 text-blue-600 dark:text-blue-400" />
++            <p>
++              Open the Google link shown above, sign in, and paste the authorization code back into the terminal.
++              Once Gemini starts, type{' '}
++              <code className="rounded bg-gray-100 px-1 font-mono text-pink-600 dark:bg-gray-800 dark:text-pink-400">/quit</code>.
++              {' '}To use an API key instead, set{' '}
++              <code className="rounded bg-gray-100 px-1 font-mono text-pink-600 dark:bg-gray-800 dark:text-pink-400">GEMINI_API_KEY</code>{' '}
++              in the server environment and restart it (get a key from{' '}
++              <a
++                href="https://aistudio.google.com/app/apikey"
++                target="_blank"
++                rel="noreferrer"
++                className="inline-flex items-center gap-1 text-blue-600 hover:underline dark:text-blue-400"
+               >
+-                Done
+-              </button>
+-            </div>
+-          ) : (
+-            <StandaloneShell project={DEFAULT_PROJECT_FOR_EMPTY_SHELL} command={command} onComplete={handleComplete} minimal={true} />
+-          )}
+-        </div>
++                Google AI Studio <ExternalLink className="h-3 w-3" />
++              </a>
++              ).
++            </p>
++          </div>
++        )}
+       </div>
+     </div>
+   );

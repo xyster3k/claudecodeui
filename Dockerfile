@@ -50,18 +50,23 @@ RUN apt-get update \
 # Leaving it unpinned meant this layer stayed cached and silently kept an old CLI, so a
 # model added to the UI dropdown would fail at runtime. Bump this when adopting new models.
 ARG CODEX_CLI_VERSION=0.154.0
+# @google/gemini-cli is pinned for the same reason; its self-update is disabled by
+# cloudcli-gemini-login, so bump it here.
+ARG GEMINI_CLI_VERSION=0.63.0
 RUN npm install -g --omit=dev \
       @anthropic-ai/claude-code \
       "@openai/codex@${CODEX_CLI_VERSION}" \
+      "@google/gemini-cli@${GEMINI_CLI_VERSION}" \
       task-master-ai
 
 # Git credential helper: reads active PAT from CloudCLI's SQLite DB.
 # Wired at /etc/gitconfig so CloudCLI's UI (which writes ~/.gitconfig) cannot clobber it.
 COPY extras/cloudcli-git-credential /usr/local/bin/cloudcli-git-credential
 COPY extras/cloudcli-project /usr/local/bin/cloudcli-project
+COPY extras/cloudcli-gemini-login /usr/local/bin/cloudcli-gemini-login
 COPY extras/cloudcli-tester-orchestrator.js /usr/local/bin/cloudcli-tester-orchestrator.js
 COPY extras/etc-gitconfig /etc/gitconfig
-RUN chmod +x /usr/local/bin/cloudcli-git-credential /usr/local/bin/cloudcli-project \
+RUN chmod +x /usr/local/bin/cloudcli-git-credential /usr/local/bin/cloudcli-project /usr/local/bin/cloudcli-gemini-login \
  && chmod 644 /etc/gitconfig /usr/local/bin/cloudcli-tester-orchestrator.js
 
 WORKDIR /app
@@ -77,7 +82,7 @@ RUN chown -R node:node /app
 
 USER node
 WORKDIR /home/node
-RUN mkdir -p /home/node/.claude /home/node/.codex /home/node/.config/gh /home/node/projects /home/node/.cloudcli /home/node/.local
+RUN mkdir -p /home/node/.claude /home/node/.codex /home/node/.gemini /home/node/.config/gh /home/node/projects /home/node/.cloudcli /home/node/.local
 
 # Claude Code keeps its main config (account, project trust, plugins) in ~/.claude.json, which
 # is outside every bind mount and was lost on each container recreate. With CLAUDE_CONFIG_DIR

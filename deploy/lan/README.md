@@ -17,7 +17,8 @@ port forwards on the router.
 ## Files
 
 - `docker-compose.lan.yml` overrides the stack: it adds `cloudflared`, removes Caddy's 80/443
-  ports, swaps in `Caddyfile.tunnel`, publishes the app on `:3001`, and persists `~/.local`.
+  ports, swaps in `Caddyfile.tunnel`, publishes the app on `:3001`, persists `~/.local` and
+  `~/.gemini` (Gemini CLI login), and passes an optional `GEMINI_API_KEY` from `.env`.
 - `Caddyfile.tunnel` is Caddy behind the tunnel: plain HTTP inside, scheme pinned to https.
 - The `Dockerfile` sets `CLAUDE_CONFIG_DIR=/home/node/.claude` and symlinks
   `~/.claude.json` into it, so Claude Code's config lives in the bind-mounted `claude-home`.
@@ -78,6 +79,17 @@ state that existed only inside it was copied into bind mounts:
 cd /srv/stack
 docker cp claudecodeui:/home/node/.claude.json claude-home/.claude.json
 docker cp claudecodeui:/home/node/.local home-local
+```
+
+Patch 082 added the `gemini-home` bind mount. Create it owned by the container user (uid
+1000) before the first deploy that includes it; otherwise Docker creates it as root and the
+CLI cannot save its login. The snapshot's `~/.gemini` held only session/tmp state, no login:
+
+```bash
+cd /srv/stack
+mkdir -p gemini-home
+docker cp claudecodeui:/home/node/.gemini/. gemini-home/
+sudo chown -R 1000:1000 gemini-home
 ```
 
 ## Host hardening (run once, as xyster3k with sudo)

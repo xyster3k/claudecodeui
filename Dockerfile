@@ -50,23 +50,31 @@ RUN apt-get update \
 # Leaving it unpinned meant this layer stayed cached and silently kept an old CLI, so a
 # model added to the UI dropdown would fail at runtime. Bump this when adopting new models.
 ARG CODEX_CLI_VERSION=0.154.0
-# @google/gemini-cli is pinned for the same reason; its self-update is disabled by
-# cloudcli-gemini-login, so bump it here.
-ARG GEMINI_CLI_VERSION=0.63.0
 RUN npm install -g --omit=dev \
       @anthropic-ai/claude-code \
       "@openai/codex@${CODEX_CLI_VERSION}" \
-      "@google/gemini-cli@${GEMINI_CLI_VERSION}" \
       task-master-ai
+
+# Antigravity CLI (agy) runs the Gemini provider (patch 085): Google retired Gemini CLI for
+# personal accounts on 2026-06-18. Google's installer verifies the binary's SHA-512 against
+# its release manifest and always installs the latest build (no version pinning); agy then
+# self-updates in place, so /opt/agy is owned by the runtime user. Not under ~/.local,
+# which is a bind mount that would hide it.
+RUN curl -fsSL https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh \
+ && HOME=/tmp/agy-home bash /tmp/agy-install.sh --dir /opt/agy/bin \
+ && rm -rf /tmp/agy-install.sh /tmp/agy-home \
+ && chown -R node:node /opt/agy \
+ && /opt/agy/bin/agy --version
+ENV PATH=/opt/agy/bin:$PATH
 
 # Git credential helper: reads active PAT from CloudCLI's SQLite DB.
 # Wired at /etc/gitconfig so CloudCLI's UI (which writes ~/.gitconfig) cannot clobber it.
 COPY extras/cloudcli-git-credential /usr/local/bin/cloudcli-git-credential
 COPY extras/cloudcli-project /usr/local/bin/cloudcli-project
-COPY extras/cloudcli-gemini-login /usr/local/bin/cloudcli-gemini-login
+COPY extras/cloudcli-agy-login /usr/local/bin/cloudcli-agy-login
 COPY extras/cloudcli-tester-orchestrator.js /usr/local/bin/cloudcli-tester-orchestrator.js
 COPY extras/etc-gitconfig /etc/gitconfig
-RUN chmod +x /usr/local/bin/cloudcli-git-credential /usr/local/bin/cloudcli-project /usr/local/bin/cloudcli-gemini-login \
+RUN chmod +x /usr/local/bin/cloudcli-git-credential /usr/local/bin/cloudcli-project /usr/local/bin/cloudcli-agy-login \
  && chmod 644 /etc/gitconfig /usr/local/bin/cloudcli-tester-orchestrator.js
 
 WORKDIR /app

@@ -1,0 +1,699 @@
+diff --git a/server/agy-event-translator.js b/server/agy-event-translator.js
+new file mode 100644
+index 0000000..ffa0339
+--- /dev/null
++++ b/server/agy-event-translator.js
+@@ -0,0 +1,94 @@
++// Translates Antigravity CLI (`agy -p --output-format stream-json`) NDJSON events into the
++// Gemini CLI stream-json event shapes that GeminiResponseHandler and the Gemini session
++// normalizer already understand. Google retired Gemini CLI for personal accounts
++// (free / AI Pro / Ultra) on 2026-06-18; `agy` is its replacement for those accounts.
++//
++// agy events (verified against agy 1.3.5):
++//   {"event":"init","conversation_id":"…","init":{"model","cwd","tools","permission_mode"}}
++//   {"event":"step_update","step_update":{"step_index","state":"ACTIVE|DONE|…","step_type":
++//       "user_input|agent_response|tool|…","text_delta"?,"tool_name"?,"tool_info"?:{"name",
++//       "parameters","output"?},"usage"?}}
++//   {"event":"result","result":{"conversation_id","status":"SUCCESS|ERROR|…","response",
++//       "error"?,"usage":{"total_tokens",…}}}
++
++const TOOL_FAILURE_STATES = new Set(['ERROR', 'FAILED', 'CANCELED', 'CANCELLED', 'INTERRUPTED']);
++
++export class AgyEventTranslator {
++  constructor() {
++    this.conversationId = null;
++    this.announcedTools = new Set();
++  }
++
++  /**
++   * @param {object} event one parsed agy NDJSON line
++   * @returns {object[]} zero or more Gemini-CLI-shaped events
++   */
++  translate(event) {
++    if (!event || typeof event !== 'object') {
++      return [];
++    }
++
++    if (event.event === 'init') {
++      this.conversationId = event.conversation_id || this.conversationId;
++      return [{ type: 'init', session_id: this.conversationId, model: event.init?.model }];
++    }
++
++    if (event.event === 'step_update') {
++      return this.translateStep(event.step_update || {});
++    }
++
++    if (event.event === 'result') {
++      const result = event.result || {};
++      const out = [];
++      if (result.status && result.status !== 'SUCCESS') {
++        out.push({ type: 'error', error: result.error || `Antigravity run ended with status ${result.status}` });
++      }
++      out.push({
++        type: 'result',
++        status: result.status === 'SUCCESS' ? 'success' : 'error',
++        stats: { total_tokens: result.usage?.total_tokens },
++      });
++      return out;
++    }
++
++    return [];
++  }
++
++  translateStep(step) {
++    if (step.step_type === 'agent_response') {
++      return step.text_delta
++        ? [{ type: 'message', role: 'assistant', content: step.text_delta, delta: true }]
++        : [];
++    }
++
++    if (step.step_type === 'tool') {
++      const toolId = `${step.conversation_id || this.conversationId || 'agy'}:${step.step_index}`;
++      const info = step.tool_info || {};
++      const out = [];
++      if (!this.announcedTools.has(toolId)) {
++        this.announcedTools.add(toolId);
++        out.push({
++          type: 'tool_use',
++          tool_id: toolId,
++          tool_name: info.name || step.tool_name || 'tool',
++          parameters: info.parameters || {},
++        });
++      }
++      const failed = TOOL_FAILURE_STATES.has(step.state);
++      if (step.state === 'DONE' || failed) {
++        let output = info.output;
++        if (output === undefined && info.error !== undefined) output = info.error;
++        if (output !== undefined && typeof output !== 'string') output = JSON.stringify(output);
++        out.push({
++          type: 'tool_result',
++          tool_id: toolId,
++          status: failed ? 'error' : 'success',
++          output: output === undefined ? '' : output.replace(/\r\n/g, '\n'),
++        });
++      }
++      return out;
++    }
++
++    return [];
++  }
++}
+diff --git a/server/gemini-cli.js b/server/gemini-cli.js
+index 2e68a93..3bb5a8d 100644
+--- a/server/gemini-cli.js
++++ b/server/gemini-cli.js
+@@ -8,6 +8,8 @@ import path from 'path';
+ import os from 'os';
+ import sessionManager from './sessionManager.js';
+ import GeminiResponseHandler from './gemini-response-handler.js';
++import { AgyEventTranslator } from './agy-event-translator.js';
++import { GEMINI_MODELS } from '../shared/modelConstants.js';
+ import { notifyRunFailed, notifyRunStopped } from './services/notification-orchestrator.js';
+ import { providerAuthService } from './modules/providers/services/provider-auth.service.js';
+ import { createNormalizedMessage } from './shared/utils.js';
+@@ -27,19 +29,20 @@ async function spawnGemini(command, options = {}, ws) {
+         skipPermissions: false
+     };
+ 
+-    // Build Gemini CLI command - start with print/resume flags first
++    // Runs the Antigravity CLI (`agy`), which replaced Gemini CLI for personal Google
++    // accounts. Its stream events are translated to Gemini CLI shapes (agy-event-translator).
+     const args = [];
+ 
+     // Add prompt flag with command if we have a command
+     if (command && command.trim()) {
+-        args.push('--prompt', command);
++        args.push('--print', command);
+     }
+ 
+-    // If we have a sessionId, we want to resume
++    // If we have a sessionId, we want to resume the agy conversation
+     if (sessionId) {
+         const session = sessionManager.getSession(sessionId);
+         if (session && session.cliSessionId) {
+-            args.push('--resume', session.cliSessionId);
++            args.push('--conversation', session.cliSessionId);
+         }
+     }
+ 
+@@ -82,7 +85,7 @@ async function spawnGemini(command, options = {}, ws) {
+                 const modifiedCommand = command + imageNote;
+ 
+                 // Update the command in args
+-                const promptIndex = args.indexOf('--prompt');
++                const promptIndex = args.indexOf('--print');
+                 if (promptIndex !== -1 && args[promptIndex + 1] === command) {
+                     args[promptIndex + 1] = modifiedCommand;
+                 } else if (promptIndex !== -1) {
+@@ -95,66 +98,31 @@ async function spawnGemini(command, options = {}, ws) {
+         }
+     }
+ 
+-    // Add basic flags for Gemini
+-    if (options.debug) {
+-        args.push('--debug');
++    // Model: agy rejects unknown slugs (no fallback), so map anything that is not a current
++    // agy Gemini model — e.g. an old Gemini CLI id saved in the browser or Builder settings —
++    // to the default instead of failing the run.
++    const knownModels = new Set(GEMINI_MODELS.OPTIONS.map((option) => option.value));
++    const requestedModel = options.model;
++    const modelToUse = knownModels.has(requestedModel) ? requestedModel : GEMINI_MODELS.DEFAULT;
++    if (requestedModel && requestedModel !== modelToUse) {
++        console.log(`Gemini (agy): model "${requestedModel}" is not an Antigravity model; using ${modelToUse}`);
+     }
+-
+-    // Add MCP config flag only if MCP servers are configured
+-    try {
+-        const geminiConfigPath = path.join(os.homedir(), '.gemini.json');
+-        let hasMcpServers = false;
+-
+-        try {
+-            await fs.access(geminiConfigPath);
+-            const geminiConfigRaw = await fs.readFile(geminiConfigPath, 'utf8');
+-            const geminiConfig = JSON.parse(geminiConfigRaw);
+-
+-            // Check global MCP servers
+-            if (geminiConfig.mcpServers && Object.keys(geminiConfig.mcpServers).length > 0) {
+-                hasMcpServers = true;
+-            }
+-
+-            // Check project-specific MCP servers
+-            if (!hasMcpServers && geminiConfig.geminiProjects) {
+-                const currentProjectPath = process.cwd();
+-                const projectConfig = geminiConfig.geminiProjects[currentProjectPath];
+-                if (projectConfig && projectConfig.mcpServers && Object.keys(projectConfig.mcpServers).length > 0) {
+-                    hasMcpServers = true;
+-                }
+-            }
+-        } catch (e) {
+-            // Ignore if file doesn't exist or isn't parsable
+-        }
+-
+-        if (hasMcpServers) {
+-            args.push('--mcp-config', geminiConfigPath);
+-        }
+-    } catch (error) {
+-        // Ignore outer errors
+-    }
+-
+-    // Add model for all sessions (both new and resumed)
+-    let modelToUse = options.model || 'gemini-2.5-flash';
+     args.push('--model', modelToUse);
+     args.push('--output-format', 'stream-json');
+ 
+-    // Handle approval modes and allowed tools
+-    if (settings.skipPermissions || options.skipPermissions || permissionMode === 'yolo') {
+-        args.push('--yolo');
+-    } else if (permissionMode === 'auto_edit') {
+-        args.push('--approval-mode', 'auto_edit');
++    // Permission modes. Headless agy cannot ask for approval: a tool that needs it is
++    // soft-denied and the run continues. bypass -> approve everything; auto_edit -> accept
++    // file edits; plan -> plan mode; default -> agy's own defaults.
++    if (settings.skipPermissions || options.skipPermissions || permissionMode === 'yolo' || permissionMode === 'bypassPermissions') {
++        args.push('--dangerously-skip-permissions');
++    } else if (permissionMode === 'auto_edit' || permissionMode === 'acceptEdits') {
++        args.push('--mode', 'accept-edits');
+     } else if (permissionMode === 'plan') {
+-        args.push('--approval-mode', 'plan');
+-    }
+-
+-    if (settings.allowedTools && settings.allowedTools.length > 0) {
+-        args.push('--allowed-tools', settings.allowedTools.join(','));
++        args.push('--mode', 'plan');
+     }
+ 
+-    // Try to find gemini in PATH first, then fall back to environment variable
+-    const geminiPath = process.env.GEMINI_PATH || 'gemini';
+-    console.log('Spawning Gemini CLI:', geminiPath, args.join(' '));
++    const geminiPath = process.env.AGY_PATH || 'agy';
++    console.log('Spawning Antigravity CLI:', geminiPath, args.join(' '));
+     console.log('Working directory:', workingDir);
+ 
+     let spawnCmd = geminiPath;
+@@ -219,15 +187,16 @@ async function spawnGemini(command, options = {}, ws) {
+         // Close stdin to signal we're done sending input
+         geminiProcess.stdin.end();
+ 
+-        // Add timeout handler
+-        const timeoutMs = 120000; // 120 seconds for slower models
++        // Inactivity timeout. agy emits nothing while a tool (e.g. a long build) runs, and the
++        // first request after a cold start was observed taking ~50 s, so allow 10 minutes.
++        const timeoutMs = 600000;
+         let timeout;
+ 
+         const startTimeout = () => {
+             if (timeout) clearTimeout(timeout);
+             timeout = setTimeout(() => {
+                 const socketSessionId = typeof ws.getSessionId === 'function' ? ws.getSessionId() : (capturedSessionId || sessionId || processKey);
+-                terminalFailureReason = `Gemini CLI timeout - no response received for ${timeoutMs / 1000} seconds`;
++                terminalFailureReason = `Antigravity CLI timeout - no output received for ${timeoutMs / 1000} seconds`;
+                 ws.send(createNormalizedMessage({ kind: 'error', content: terminalFailureReason, sessionId: socketSessionId, provider: 'gemini' }));
+                 try {
+                     geminiProcess.kill('SIGTERM');
+@@ -246,6 +215,7 @@ async function spawnGemini(command, options = {}, ws) {
+         let responseHandler;
+         if (ws) {
+             responseHandler = new GeminiResponseHandler(ws, {
++                translator: new AgyEventTranslator(),
+                 onContentFragment: (content) => {
+                     if (assistantBlocks.length > 0 && assistantBlocks[assistantBlocks.length - 1].type === 'text') {
+                         assistantBlocks[assistantBlocks.length - 1].text += content;
+@@ -334,16 +304,20 @@ async function spawnGemini(command, options = {}, ws) {
+         geminiProcess.stderr.on('data', (data) => {
+             const errorMsg = data.toString();
+ 
+-            // Filter out deprecation warnings and "Loaded cached credentials" message
+-            if (errorMsg.includes('[DEP0040]') ||
+-                errorMsg.includes('DeprecationWarning') ||
+-                errorMsg.includes('--trace-deprecation') ||
+-                errorMsg.includes('Loaded cached credentials')) {
++            // agy repeats a failed run's error on stderr ("error: …" and "AGY_ERROR: {…}");
++            // the same text arrives in the stream's result event, which is shown instead.
++            const lines = errorMsg.split('\n').filter((line) =>
++                line.trim() &&
++                !line.startsWith('AGY_ERROR:') &&
++                !line.startsWith('error: ') &&
++                !line.startsWith('Available models:') &&
++                !/^\s{2}\S/.test(line));
++            if (lines.length === 0) {
+                 return;
+             }
+ 
+             const socketSessionId = typeof ws.getSessionId === 'function' ? ws.getSessionId() : (capturedSessionId || sessionId);
+-            ws.send(createNormalizedMessage({ kind: 'error', content: errorMsg, sessionId: socketSessionId, provider: 'gemini' }));
++            ws.send(createNormalizedMessage({ kind: 'error', content: lines.join('\n'), sessionId: socketSessionId, provider: 'gemini' }));
+         });
+ 
+         // Handle process completion
+@@ -386,7 +360,7 @@ async function spawnGemini(command, options = {}, ws) {
+                     const installed = await providerAuthService.isProviderInstalled('gemini');
+                     if (!installed) {
+                         const socketSessionId = typeof ws.getSessionId === 'function' ? ws.getSessionId() : finalSessionId;
+-                        ws.send(createNormalizedMessage({ kind: 'error', content: 'Gemini CLI is not installed. Please install it first: https://github.com/google-gemini/gemini-cli', sessionId: socketSessionId, provider: 'gemini' }));
++                        ws.send(createNormalizedMessage({ kind: 'error', content: 'Antigravity CLI (agy) is not installed. See https://antigravity.google/docs/cli/install/', sessionId: socketSessionId, provider: 'gemini' }));
+                     }
+                 }
+ 
+@@ -407,7 +381,7 @@ async function spawnGemini(command, options = {}, ws) {
+             // Check if Gemini CLI is installed for a clearer error message
+             const installed = await providerAuthService.isProviderInstalled('gemini');
+             const errorContent = !installed
+-                ? 'Gemini CLI is not installed. Please install it first: https://github.com/google-gemini/gemini-cli'
++                ? 'Antigravity CLI (agy) is not installed. See https://antigravity.google/docs/cli/install/'
+                 : error.message;
+ 
+             const errorSessionId = typeof ws.getSessionId === 'function' ? ws.getSessionId() : finalSessionId;
+diff --git a/server/gemini-response-handler.js b/server/gemini-response-handler.js
+index b0a1748..3906def 100644
+--- a/server/gemini-response-handler.js
++++ b/server/gemini-response-handler.js
+@@ -9,6 +9,8 @@ class GeminiResponseHandler {
+     this.onInit = options.onInit || null;
+     this.onToolUse = options.onToolUse || null;
+     this.onToolResult = options.onToolResult || null;
++    // Optional: maps each raw NDJSON event to Gemini-CLI-shaped events (agy runs).
++    this.translator = options.translator || null;
+   }
+ 
+   // Process incoming raw data from Gemini stream-json
+@@ -24,12 +26,21 @@ class GeminiResponseHandler {
+     for (const line of lines) {
+       if (!line.trim()) continue;
+ 
++      let event;
+       try {
+-        const event = JSON.parse(line);
+-        this.handleEvent(event);
++        event = JSON.parse(line);
+       } catch (err) {
+         // Not a JSON line, probably debug output or CLI warnings
++        continue;
+       }
++      this.dispatch(event);
++    }
++  }
++
++  dispatch(event) {
++    const events = this.translator ? this.translator.translate(event) : [event];
++    for (const translated of events) {
++      this.handleEvent(translated);
+     }
+   }
+ 
+@@ -64,10 +75,13 @@ class GeminiResponseHandler {
+ 
+   forceFlush() {
+     if (this.buffer.trim()) {
++      let event;
+       try {
+-        const event = JSON.parse(this.buffer);
+-        this.handleEvent(event);
+-      } catch (err) { }
++        event = JSON.parse(this.buffer);
++      } catch (err) {
++        return;
++      }
++      this.dispatch(event);
+     }
+   }
+ 
+diff --git a/server/modules/providers/list/gemini/gemini-auth.provider.ts b/server/modules/providers/list/gemini/gemini-auth.provider.ts
+index 9adabe5..1820aec 100644
+--- a/server/modules/providers/list/gemini/gemini-auth.provider.ts
++++ b/server/modules/providers/list/gemini/gemini-auth.provider.ts
+@@ -15,15 +15,20 @@ type GeminiCredentialsStatus = {
+   error?: string;
+ };
+ 
++/**
++ * Gemini provider auth, backed by the Antigravity CLI (`agy`). Google retired Gemini CLI
++ * for personal accounts (free / AI Pro / Ultra) on 2026-06-18; `agy` signs in with the same
++ * Google account and keeps the session in ~/.gemini/antigravity-cli/antigravity-oauth-token.
++ */
+ export class GeminiProviderAuth implements IProviderAuth {
+   /**
+-   * Checks whether the Gemini CLI is available on this host.
++   * Checks whether the Antigravity CLI is available on this host.
+    */
+   private checkInstalled(): boolean {
+-    const cliPath = process.env.GEMINI_PATH || 'gemini';
++    const cliPath = process.env.AGY_PATH || 'agy';
+     try {
+       // spawn.sync reports a missing binary (ENOENT) via result.error rather than throwing.
+-      const result = spawn.sync(cliPath, ['--version'], { stdio: 'ignore', timeout: 5000 });
++      const result = spawn.sync(cliPath, ['--version'], { stdio: 'ignore', timeout: 10000 });
+       return !result.error && result.status === 0;
+     } catch {
+       return false;
+@@ -31,7 +36,7 @@ export class GeminiProviderAuth implements IProviderAuth {
+   }
+ 
+   /**
+-   * Returns Gemini CLI installation and credential status.
++   * Returns Antigravity CLI installation and credential status.
+    */
+   async getStatus(): Promise<ProviderAuthStatus> {
+     const installed = this.checkInstalled();
+@@ -43,7 +48,7 @@ export class GeminiProviderAuth implements IProviderAuth {
+         authenticated: false,
+         email: null,
+         method: null,
+-        error: 'Gemini CLI is not installed',
++        error: 'Antigravity CLI (agy) is not installed',
+       };
+     }
+ 
+@@ -60,91 +65,48 @@ export class GeminiProviderAuth implements IProviderAuth {
+   }
+ 
+   /**
+-   * Checks Gemini credentials from API key env vars or local OAuth credential files.
++   * Checks the agy Google sign-in token file. Purely local: no network call, so the
++   * Settings page stays fast.
+    */
+   private async checkCredentials(): Promise<GeminiCredentialsStatus> {
+-    if (process.env.GEMINI_API_KEY?.trim()) {
+-      return { authenticated: true, email: 'API Key Auth', method: 'api_key' };
+-    }
+-
+     try {
+-      const credsPath = path.join(os.homedir(), '.gemini', 'oauth_creds.json');
+-      const content = await readFile(credsPath, 'utf8');
+-      const creds = readObjectRecord(JSON.parse(content)) ?? {};
+-      const accessToken = readOptionalString(creds.access_token);
+-
+-      if (!accessToken) {
+-        return {
+-          authenticated: false,
+-          email: null,
+-          method: null,
+-          error: 'No valid tokens found in oauth_creds',
+-        };
+-      }
++      const tokenPath = path.join(os.homedir(), '.gemini', 'antigravity-cli', 'antigravity-oauth-token');
++      const content = await readFile(tokenPath, 'utf8');
++      const record = readObjectRecord(JSON.parse(content)) ?? {};
++      const token = readObjectRecord(record.token) ?? {};
+ 
+-      const refreshToken = readOptionalString(creds.refresh_token);
+-      const tokenInfo = await this.getTokenInfoEmail(accessToken);
+-      if (tokenInfo.valid) {
++      if (readOptionalString(token.refresh_token) || readOptionalString(token.access_token)) {
+         return {
+           authenticated: true,
+-          email: tokenInfo.email || 'OAuth Session',
+-          method: 'credentials_file',
+-        };
+-      }
+-
+-      if (!refreshToken) {
+-        return {
+-          authenticated: false,
+-          email: null,
+-          method: 'credentials_file',
+-          error: 'Access token invalid and no refresh token found',
++          email: this.readIdTokenEmail(readOptionalString(record.id_token)) || 'Google account',
++          method: readOptionalString(record.auth_method) ?? 'google_oauth',
+         };
+       }
+-
+-      return {
+-        authenticated: true,
+-        email: await this.getActiveAccountEmail() || 'OAuth Session',
+-        method: 'credentials_file',
+-      };
+     } catch {
+-      return {
+-        authenticated: false,
+-        email: null,
+-        method: null,
+-        error: 'Gemini CLI not configured',
+-      };
++      // No sign-in yet.
+     }
+-  }
+-
+-  /**
+-   * Validates a Gemini OAuth access token and returns an email when Google reports one.
+-   */
+-  private async getTokenInfoEmail(accessToken: string): Promise<{ valid: boolean; email: string | null }> {
+-    try {
+-      const tokenRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${accessToken}`);
+-      if (!tokenRes.ok) {
+-        return { valid: false, email: null };
+-      }
+ 
+-      const tokenInfo = readObjectRecord(await tokenRes.json());
+-      return {
+-        valid: true,
+-        email: readOptionalString(tokenInfo?.email) ?? null,
+-      };
+-    } catch {
+-      return { valid: false, email: null };
+-    }
++    // GEMINI_API_KEY alone is not reported as signed in: agy ignores it unless
++    // "modelProvider": "gemini" is also set in ~/.gemini/antigravity-cli/settings.json.
++    return {
++      authenticated: false,
++      email: null,
++      method: null,
++      error: 'Not signed in to Antigravity CLI',
++    };
+   }
+ 
+   /**
+-   * Reads Gemini's active local Google account as an offline fallback for display.
++   * Reads the email claim from a Google id_token (JWT) without verifying it; display only.
+    */
+-  private async getActiveAccountEmail(): Promise<string | null> {
++  private readIdTokenEmail(idToken: string | null | undefined): string | null {
++    const payload = idToken?.split('.')[1];
++    if (!payload) {
++      return null;
++    }
+     try {
+-      const accPath = path.join(os.homedir(), '.gemini', 'google_accounts.json');
+-      const accContent = await readFile(accPath, 'utf8');
+-      const accounts = readObjectRecord(JSON.parse(accContent));
+-      return readOptionalString(accounts?.active) ?? null;
++      const claims = readObjectRecord(JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')));
++      return readOptionalString(claims?.email) ?? null;
+     } catch {
+       return null;
+     }
+diff --git a/server/modules/websocket/services/shell-websocket.service.ts b/server/modules/websocket/services/shell-websocket.service.ts
+index 0872e2d..6d55705 100644
+--- a/server/modules/websocket/services/shell-websocket.service.ts
++++ b/server/modules/websocket/services/shell-websocket.service.ts
+@@ -44,6 +44,37 @@ type ShellWebSocketDependencies = {
+ /**
+  * Reads a string field from untyped payloads and falls back when absent.
+  */
++const URL_CONTINUATION = /^\r?\n ?([A-Za-z0-9%&=._~:/?#+@!$'()*,;[\]-]+)(?=\r?\n)/;
++
++/**
++ * TUIs such as the Antigravity CLI (`agy`) hard-wrap a long sign-in URL into several
++ * " <chunk>\r\n" lines, so plain URL extraction only finds the first line. Re-join lines
++ * that directly continue a URL (a lone run of URL characters on its own line). Only the
++ * URL-detection copy of the output is changed, never what the terminal displays.
++ */
++function joinHardWrappedUrls(text: string): string {
++  let result = '';
++  let rest = text;
++  for (;;) {
++    const start = rest.search(/https?:\/\//);
++    if (start === -1) {
++      return result + rest;
++    }
++    const lineEnd = rest.slice(start).search(/[\s]/);
++    if (lineEnd === -1) {
++      return result + rest;
++    }
++    let url = rest.slice(start, start + lineEnd);
++    let tail = rest.slice(start + lineEnd);
++    for (let match = URL_CONTINUATION.exec(tail); match; match = URL_CONTINUATION.exec(tail)) {
++      url += match[1];
++      tail = tail.slice(match[0].length);
++    }
++    result += rest.slice(0, start) + url;
++    rest = tail;
++  }
++}
++
+ function readString(value: unknown, fallback = ''): string {
+   return typeof value === 'string' ? value : fallback;
+ }
+@@ -186,7 +217,7 @@ export function handleShellConnection(
+           (initialCommand.includes('setup-token') ||
+             initialCommand.includes('cursor-agent login') ||
+             initialCommand.includes('codex login') ||
+-            initialCommand.includes('cloudcli-gemini-login') ||
++            initialCommand.includes('cloudcli-agy-login') ||
+             initialCommand.includes('auth login'));
+ 
+         const commandSuffix =
+@@ -327,7 +358,7 @@ export function handleShellConnection(
+               }
+             };
+ 
+-            const normalizedDetectedUrls = dependencies.extractUrlsFromText(urlDetectionBuffer)
++            const normalizedDetectedUrls = dependencies.extractUrlsFromText(joinHardWrappedUrls(urlDetectionBuffer))
+               .map((url) => dependencies.normalizeDetectedUrl(url))
+               .filter((url): url is string => Boolean(url));
+ 
+diff --git a/shared/modelConstants.js b/shared/modelConstants.js
+index 9710ee3..0981400 100644
+--- a/shared/modelConstants.js
++++ b/shared/modelConstants.js
+@@ -82,25 +82,21 @@ export const CODEX_MODELS = {
+ };
+ 
+ /**
+- * Gemini Models
++ * Gemini Models — slugs of the Antigravity CLI (`agy models`), which runs the Gemini
++ * provider since Google retired Gemini CLI for personal accounts. The suffix is the
++ * reasoning effort.
+  */
+ export const GEMINI_MODELS = {
+   OPTIONS: [
+-    { value: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro Preview" },
+-    { value: "gemini-3-pro-preview", label: "Gemini 3 Pro Preview" },
+-    { value: "gemini-3-flash-preview", label: "Gemini 3 Flash Preview" },
+-    { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+-    { value: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+-    { value: "gemini-2.0-flash-lite", label: "Gemini 2.0 Flash Lite" },
+-    { value: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
+-    { value: "gemini-2.0-pro-exp", label: "Gemini 2.0 Pro Experimental" },
+-    {
+-      value: "gemini-2.0-flash-thinking-exp",
+-      label: "Gemini 2.0 Flash Thinking",
+-    },
++    { value: "gemini-4-argon-medium", label: "Gemini 4 Argon (Medium)" },
++    { value: "gemini-4-argon-high", label: "Gemini 4 Argon (High)" },
++    { value: "gemini-4-argon-low", label: "Gemini 4 Argon (Low)" },
++    { value: "gemini-3.8-flash-high", label: "Gemini 3.8 Flash (High)" },
++    { value: "gemini-3.8-flash-medium", label: "Gemini 3.8 Flash (Medium)" },
++    { value: "gemini-3.8-flash-low", label: "Gemini 3.8 Flash (Low)" },
+   ],
+ 
+-  DEFAULT: "gemini-3.1-pro-preview",
++  DEFAULT: "gemini-4-argon-medium",
+ };
+ 
+ /**
+diff --git a/src/components/chat/hooks/useChatProviderState.ts b/src/components/chat/hooks/useChatProviderState.ts
+index 7842ecb..0d7565d 100644
+--- a/src/components/chat/hooks/useChatProviderState.ts
++++ b/src/components/chat/hooks/useChatProviderState.ts
+@@ -34,7 +34,11 @@ export function useChatProviderState({ selectedSession }: UseChatProviderStateAr
+     return localStorage.getItem('codex-model') || CODEX_MODELS.DEFAULT;
+   });
+   const [geminiModel, setGeminiModel] = useState<string>(() => {
+-    return localStorage.getItem('gemini-model') || GEMINI_MODELS.DEFAULT;
++    // A Gemini CLI model saved before the switch to Antigravity is no longer valid.
++    const saved = localStorage.getItem('gemini-model');
++    return saved && GEMINI_MODELS.OPTIONS.some((option: { value: string }) => option.value === saved)
++      ? saved
++      : GEMINI_MODELS.DEFAULT;
+   });
+ 
+   const lastProviderRef = useRef(provider);
+diff --git a/src/components/provider-auth/view/ProviderLoginModal.tsx b/src/components/provider-auth/view/ProviderLoginModal.tsx
+index 2bbb8ce..24c1351 100644
+--- a/src/components/provider-auth/view/ProviderLoginModal.tsx
++++ b/src/components/provider-auth/view/ProviderLoginModal.tsx
+@@ -1,4 +1,4 @@
+-import { ExternalLink, KeyRound, X } from 'lucide-react';
++import { KeyRound, X } from 'lucide-react';
+ import StandaloneShell from '../../standalone-shell/view/StandaloneShell';
+ import { DEFAULT_PROJECT_FOR_EMPTY_SHELL } from '../../../constants/config';
+ import type { LLMProvider } from '../../../types/app';
+@@ -40,17 +40,17 @@ const getProviderCommand = ({
+     return 'codex login --device-auth';
+   }
+ 
+-  // Google-account login (Google AI Pro/Ultra subscription or free tier) via the
+-  // headless OAuth flow: the CLI prints a URL and reads the code back from the
+-  // terminal, because a browser callback on localhost can't reach the container.
+-  return 'cloudcli-gemini-login';
++  // Google-account login (Google AI Pro/Ultra subscription or free tier) through the
++  // Antigravity CLI, which replaced Gemini CLI for personal accounts. It prints a URL and
++  // reads the code back from the terminal: a localhost callback can't reach the container.
++  return 'cloudcli-agy-login';
+ };
+ 
+ const getProviderTitle = (provider: LLMProvider) => {
+   if (provider === 'claude') return 'Claude CLI Login';
+   if (provider === 'cursor') return 'Cursor CLI Login';
+   if (provider === 'codex') return 'Codex CLI Login';
+-  return 'Gemini CLI Login';
++  return 'Gemini Login (Antigravity CLI)';
+ };
+ 
+ export default function ProviderLoginModal({
+@@ -95,21 +95,11 @@ export default function ProviderLoginModal({
+           <div className="flex items-start gap-3 border-t border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600 dark:border-gray-700 dark:bg-gray-900/50 dark:text-gray-400">
+             <KeyRound className="mt-0.5 h-4 w-4 flex-shrink-0 text-blue-600 dark:text-blue-400" />
+             <p>
+-              Open the Google link shown above, sign in, and paste the authorization code back into the terminal.
+-              Once Gemini starts, type{' '}
++              Choose <b>Google OAuth</b>, open the Google link (it also appears as a button), sign in with your Google
++              account (AI Pro/Ultra or free), and paste the code from the browser back into the terminal. Then finish
++              the short setup screens and type{' '}
+               <code className="rounded bg-gray-100 px-1 font-mono text-pink-600 dark:bg-gray-800 dark:text-pink-400">/quit</code>.
+-              {' '}To use an API key instead, set{' '}
+-              <code className="rounded bg-gray-100 px-1 font-mono text-pink-600 dark:bg-gray-800 dark:text-pink-400">GEMINI_API_KEY</code>{' '}
+-              in the server environment and restart it (get a key from{' '}
+-              <a
+-                href="https://aistudio.google.com/app/apikey"
+-                target="_blank"
+-                rel="noreferrer"
+-                className="inline-flex items-center gap-1 text-blue-600 hover:underline dark:text-blue-400"
+-              >
+-                Google AI Studio <ExternalLink className="h-3 w-3" />
+-              </a>
+-              ).
++              Gemini chats then run on this login; it is kept across restarts.
+             </p>
+           </div>
+         )}

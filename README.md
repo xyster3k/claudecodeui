@@ -23,7 +23,7 @@ claudecodeui/
 |-- extras/
 |   |-- cloudcli-git-credential # GitHub PAT credential helper backed by CloudCLI auth DB
 |   |-- cloudcli-project        # per-project git identity and token routing helper
-|   |-- cloudcli-gemini-login   # Gemini "Login with Google" for the headless container
+|   |-- cloudcli-agy-login      # Gemini (Antigravity CLI) Google sign-in for the container
 |   `-- etc-gitconfig           # global credential helper wiring for the container
 |-- patches/                   # local customizations, applied in filename order
 `-- README.md                  # this guide and feature inventory
@@ -64,17 +64,28 @@ docker exec claudecodeui codex --version
 docker exec claudecodeui node -e "console.log(JSON.parse(require('fs').readFileSync('/home/node/.codex/models_cache.json','utf8')).models.map(m=>m.id))"
 ```
 
-## Pinned Gemini CLI
+## Gemini runs on the Antigravity CLI
 
-`GEMINI_CLI_VERSION` in `Dockerfile` (currently `0.63.0`) pins the globally installed
-`@google/gemini-cli`, for the same cached-layer reason as Codex. `cloudcli-gemini-login`
-turns off the CLI's self-update, so bump the pin to upgrade it. The login (`oauth_creds.json`,
-`google_accounts.json`) and `settings.json` live in `~/.gemini`, bind-mounted from
-`/srv/stack/gemini-home`. Verify with:
+Google stopped serving Gemini CLI to personal accounts (free, AI Pro, Ultra) on 2026-06-18
+("This client is no longer supported for Gemini Code Assist for individuals"). Since patch
+085 the Gemini provider runs the Antigravity CLI (`agy`) instead, which accepts those
+subscriptions. The image installs it to `/opt/agy/bin` with Google's installer (SHA-512
+checked, always the latest build, then self-updating; it cannot be pinned).
+
+- Sign-in: Settings → Gemini → Login runs `cloudcli-agy-login`, which shows a Google URL and
+  reads the code back. The session is the file
+  `~/.gemini/antigravity-cli/antigravity-oauth-token`; `~/.gemini` is bind-mounted from
+  `/srv/stack/gemini-home`, so it survives rebuilds. No keyring service is needed.
+- Chats run `agy --print … --output-format stream-json [--conversation <id>]`;
+  `server/agy-event-translator.js` maps its events to the Gemini CLI shapes the UI parses.
+- Usage counts against the Google account's Antigravity quota; when it is used up, chats show
+  `Individual quota reached … Resets in …`.
+
+Verify with:
 
 ```bash
-docker exec claudecodeui gemini --version
-docker exec claudecodeui ls -l /home/node/.gemini
+docker exec claudecodeui agy --version
+docker exec claudecodeui ls -l /home/node/.gemini/antigravity-cli/antigravity-oauth-token
 ```
 
 ## User Guide
@@ -201,6 +212,7 @@ Every user-visible patch should be listed here when added. Keep this table curre
 | `082-gemini-google-login.patch` | Gemini Google-account login | Settings → Gemini → Login opened a static "Setup Gemini API Access" page with a non-existent `gemini config set api_key` command, so Gemini could only be used with an API key (and the CLI was not installed in the image at all). Login now opens a terminal running `cloudcli-gemini-login`: it sets `security.auth.selectedType=oauth-personal` in `~/.gemini/settings.json` and runs Gemini with `NO_BROWSER=true`, which prints a Google sign-in URL and reads the authorization code back from the terminal. This uses the Google account's own quota (free tier or Google AI Pro/Ultra). Type `/quit` once Gemini's prompt appears. `GEMINI_API_KEY` in the server environment still works as an alternative. Also fixes the install check, which reported a missing CLI as "Gemini CLI not configured" because `spawn.sync` does not throw on ENOENT. |
 | `083-thinking-mode-setter-type.patch` | Typecheck fix | No behavior change. Patch 009 replaced `setThinkingMode` with a persisting `(mode: string) => void` wrapper, but `ChatComposer` still typed the prop as `Dispatch<SetStateAction<string>>`, so frontend `tsc --noEmit` failed at `ChatInterface.tsx:491` (the Vite build does not typecheck, so it went unnoticed). The prop type now matches the wrapper. |
 | `084-login-audit-log.patch` | Login audit log | The username/password login (`POST /api/auth/login`) logged nothing. It now writes `[AUTH] login ok|failed reason=unknown-user|bad-password user="..." ip=... via=direct|proxy` (client IP from `cf-connecting-ip` / `x-forwarded-for` behind the tunnel). The LAN Telegram notifier (`deploy/lan/notifier`) turns these into login and failed-login messages. Passwords are never logged. |
+| `085-gemini-via-antigravity-cli.patch` | Gemini via Antigravity CLI | Google retired Gemini CLI for personal accounts, so Gemini login failed with "This client is no longer supported". The Gemini provider (chat, Builder, Tester, `/api/agent`) now runs `agy`: `--print` with `--output-format stream-json`, resume via `--conversation`, permission modes mapped to `--dangerously-skip-permissions` / `--mode accept-edits|plan`. `server/agy-event-translator.js` converts its events to the Gemini CLI shapes the UI already renders (text deltas, tool use/results, token totals, errors such as quota exhaustion). Models: Gemini 4 Argon and Gemini 3.8 Flash at low/medium/high effort (default Argon Medium); stale saved model IDs fall back to the default. Login runs `cloudcli-agy-login` (Google URL + pasted code); the terminal now re-joins hard-wrapped URLs so the full sign-in link is offered. Status reads agy's token file and shows the account email. Gemini MCP settings and `--allowed-tools` are not passed to agy. |
 
 ## Adding A Feature
 

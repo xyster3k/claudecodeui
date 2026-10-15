@@ -1,0 +1,33 @@
+#!/bin/bash
+# cloudcli-agy-login — sign the Antigravity CLI (agy) in with a Google account.
+#
+# Run by CloudCLI's Gemini "Login" button (patch 085). Google retired Gemini CLI for
+# personal accounts (free / AI Pro / Ultra) on 2026-06-18; agy is the replacement and the
+# Gemini provider now runs on it.
+#
+# agy's normal sign-in opens a local browser. When it detects an SSH session it instead
+# prints an authorization URL and reads the code back from the terminal, which is what a
+# remote container needs, so present this terminal as one. The session is saved in
+# ~/.gemini/antigravity-cli/antigravity-oauth-token (bind-mounted, survives rebuilds).
+
+set -euo pipefail
+
+export SSH_CONNECTION="${SSH_CONNECTION:-127.0.0.1 0 127.0.0.1 22}"
+export SSH_TTY="${SSH_TTY:-$(tty 2>/dev/null || echo /dev/pts/0)}"
+
+# A fixed folder, so the "trust this folder" question is asked once, not per project.
+WORKSPACE="$HOME/.gemini/agy-login"
+mkdir -p "$WORKSPACE"
+cd "$WORKSPACE"
+
+if [ -s "$HOME/.gemini/antigravity-cli/antigravity-oauth-token" ]; then
+  echo "Already signed in to Antigravity. To switch accounts, run /logout inside agy, then"
+  echo "close this window and press Login again."
+else
+  echo "Choose \"Google OAuth\", open the link agy prints (also shown as a button above),"
+  echo "sign in, and paste the code from the browser back here."
+fi
+echo "When agy's prompt appears, you are signed in — type /quit to close it."
+echo
+
+exec agy
